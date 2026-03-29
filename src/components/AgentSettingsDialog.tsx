@@ -29,9 +29,9 @@ export function AgentSettingsDialog() {
   const [showKeys, setShowKeys] = useState<Record<string, Record<number, boolean>>>({});
   const { toast } = useToast();
 
-  const [providerEnabled, setProviderEnabled] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState("openai");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [providerEnabled, setProviderEnabled] = useState(true);
+  const [selectedProvider, setSelectedProvider] = useState("gemini");
+  const [selectedModel, setSelectedModel] = useState("gemini-2.5-pro");
   const [providerKeys, setProviderKeys] = useState<ProviderKeysMap>({});
   const [checkingKey, setCheckingKey] = useState<string | null>(null); // "providerId-index"
 
@@ -274,41 +274,27 @@ export function AgentSettingsDialog() {
           </TabsContent>
 
           <TabsContent value="ai" className="space-y-4 mt-4">
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
+            <div className="flex items-center justify-between p-3 rounded-lg border border-primary bg-primary/10">
               <div className="flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-primary" />
                 <div>
-                  <p className="text-sm font-medium text-foreground">استخدام مزود ذكاء مخصص</p>
-                  <p className="text-[11px] text-muted-foreground">بدلاً من المزود الافتراضي</p>
+                  <p className="text-sm font-medium text-primary">Gemini - مزود الذكاء الحصري</p>
+                  <p className="text-[11px] text-muted-foreground">Gemini هو المزود الوحيد المتاح</p>
                 </div>
               </div>
-              <Switch checked={providerEnabled} onCheckedChange={setProviderEnabled} />
+              <Switch checked={providerEnabled} disabled />
             </div>
 
             <div className="space-y-4">
-              {/* Provider Selection */}
-              <div className="space-y-2">
-                <Label className="text-foreground">اختر المزود النشط</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {AI_PROVIDERS.map(provider => {
-                    const keyCount = getProviderKeyCount(provider.id);
-                    return (
-                      <button key={provider.id} onClick={() => setSelectedProvider(provider.id)}
-                        className={`p-3 rounded-lg border text-sm font-medium transition-all text-center relative ${
-                          selectedProvider === provider.id
-                            ? "border-primary bg-primary/10 text-primary shadow-sm"
-                            : "border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                        }`}>
-                        <div className="font-semibold">{provider.name}</div>
-                        <div className="text-[10px] opacity-70">{provider.nameAr}</div>
-                        {keyCount > 0 && (
-                          <span className="absolute top-1 left-1 bg-primary text-primary-foreground text-[9px] rounded-full w-4 h-4 flex items-center justify-center">
-                            {keyCount}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+              {/* Gemini Information */}
+              <div className="p-3 rounded-lg border border-border bg-card space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Google Gemini</p>
+                    <p className="text-[10px] text-muted-foreground">نموذج الذكاء الاصطناعي المتقدم من Google</p>
+                  </div>
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                    className="text-[11px] text-primary hover:underline">🔑 احصل على API Key</a>
                 </div>
               </div>
 
@@ -337,27 +323,14 @@ export function AgentSettingsDialog() {
                 {renderProviderKeys(selectedProvider)}
               </div>
 
-              {/* Summary of all providers with keys */}
-              {Object.keys(providerKeys).filter(pid => pid !== selectedProvider && (providerKeys[pid] || []).some(k => k.key.trim())).length > 0 && (
-                <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-2">
-                  <Label className="text-foreground text-xs">مفاتيح المزودين الآخرين</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {AI_PROVIDERS.filter(p => p.id !== selectedProvider && getProviderKeyCount(p.id) > 0).map(p => (
-                      <button key={p.id} onClick={() => setSelectedProvider(p.id)}
-                        className="text-[11px] px-2 py-1 rounded border border-border bg-card hover:border-primary/50 transition-colors flex items-center gap-1">
-                        <span>{p.name}</span>
-                        <span className="bg-primary/20 text-primary rounded-full px-1.5 text-[9px]">{getProviderKeyCount(p.id)}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+
 
               {/* Info */}
               <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
-                <p>⚡ عند التفعيل، سيستخدم الوكيل المزود والموديل المختار بدل الافتراضي.</p>
-                <p>🔄 عند فشل مفتاح (انتهاء الرصيد أو خطأ)، يتم تجربة المفتاح التالي تلقائياً.</p>
-                <p>🔑 كل مزود يحتفظ بمفاتيحه بشكل مستقل.</p>
+                <p>🤖 Gemini هو مزود الذكاء الاصطناعي الحصري في هذا المشروع.</p>
+                <p>⚡ يتم استخدام Gemini تلقائياً لجميع طلبات الذكاء الاصطناعي.</p>
+                <p>🔄 عند فشل مفتاح (خطأ أو مشكلة)، يتم تجربة المفتاح التالي تلقائياً.</p>
+                <p>🔑 يمكنك إضافة عدة مفاتيح API لـ Gemini.</p>
               </div>
             </div>
           </TabsContent>

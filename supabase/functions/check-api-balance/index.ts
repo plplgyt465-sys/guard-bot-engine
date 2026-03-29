@@ -49,7 +49,7 @@ serve(async (req) => {
       } else {
         status = "invalid";
       }
-    } else if (providerId === "google") {
+    } else if (providerId === "google" || providerId === "gemini") {
       // Test with models list
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
       if (resp.status === 400 || resp.status === 403) status = "invalid";
