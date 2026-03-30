@@ -1,4 +1,5 @@
 import { getAIProviderSettings } from "./ai-providers";
+import { callGeminiPython } from "./gemini-wrapper";
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
@@ -18,6 +19,27 @@ export async function streamChat({
   onError: (error: string) => void;
 }) {
   const providerSettings = await getAIProviderSettings();
+
+  // Check if using Gemini Python (no API key needed)
+  if (providerSettings?.providerId === "gemini" || !providerSettings) {
+    try {
+      const response = await callGeminiPython(messages as any);
+      if (response.success && response.content) {
+        // Stream the response character by character for consistency
+        for (const char of response.content) {
+          onDelta(char);
+          await new Promise(resolve => setTimeout(resolve, 10)); // Small delay for streaming effect
+        }
+        onDone();
+      } else {
+        onError(response.error || "فشل الحصول على رد من Gemini");
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "خطأ في التواصل مع Gemini");
+    }
+    return;
+  }
+
   const body: any = { messages, customSystemPrompt };
 
   // Build allProviderKeys from ALL providers that have keys, regardless of enabled state

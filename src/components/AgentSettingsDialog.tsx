@@ -29,9 +29,9 @@ export function AgentSettingsDialog() {
   const [showKeys, setShowKeys] = useState<Record<string, Record<number, boolean>>>({});
   const { toast } = useToast();
 
-  const [providerEnabled, setProviderEnabled] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState("openai");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [providerEnabled, setProviderEnabled] = useState(true);
+  const [selectedProvider, setSelectedProvider] = useState("gemini");
+  const [selectedModel, setSelectedModel] = useState("gemini-direct");
   const [providerKeys, setProviderKeys] = useState<ProviderKeysMap>({});
   const [checkingKey, setCheckingKey] = useState<string | null>(null); // "providerId-index"
 
@@ -46,9 +46,9 @@ export function AgentSettingsDialog() {
           setSelectedModel(settings.modelId);
           setProviderKeys(settings.providerKeys || {});
         } else {
-          setProviderEnabled(false);
-          setSelectedProvider("openai");
-          setSelectedModel("");
+          setProviderEnabled(true);
+          setSelectedProvider("gemini");
+          setSelectedModel("gemini-direct");
           setProviderKeys({});
         }
       })();
@@ -263,7 +263,7 @@ export function AgentSettingsDialog() {
               تعريف الوكيل وشخصيته وقواعده
             </Label>
             <p className="text-xs text-muted-foreground">
-              اكت�� هنا التعليمات المخصصة التي تريد أن يتبعها الوكيل.
+              اكت�� هنا التعليمات الم��صصة التي تريد أن يتبعها الوكيل.
             </p>
             <Textarea id="agent-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)}
               placeholder={`مثال:\nأنت خبير أمن سيبراني محترف اسمك "حارس".\nتتحدث بالعربية الفصحى فقط.\nتقدم تحليلات مفصلة مع توصيات عملية.`}
