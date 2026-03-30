@@ -11,6 +11,16 @@ export interface AIProvider {
 
 export const AI_PROVIDERS: AIProvider[] = [
   {
+    id: "gemini-free",
+    name: "Gemini (Free - No API Key)",
+    nameAr: "جيميني (مجاني - بدون مفتاح API)",
+    baseUrl: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+    apiKeyUrl: "https://gemini.google.com",
+    models: [
+      { id: "gemini-free", name: "Gemini (Direct Connection)" },
+    ],
+  },
+  {
     id: "openai",
     name: "OpenAI",
     nameAr: "أوبن إيه آي",
