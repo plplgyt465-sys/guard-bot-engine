@@ -99,7 +99,7 @@ const SYSTEM_PROMPT = `أنت أداة اختبار اختراق احترافي�
 1. ابدأ بـ recall_target لاسترجاع بيانات سابقة
 2. نفذ 10 أدوات في كل جولة — كل جولة منفصلة عن الأخرى
 3. بعد كل جولة، اكتب ملخصاً مفصلاً وتحليلاً عميقاً لنتائج الـ 10 أدوات
-4. بعد كل جولة، حلل النتائج وقرر ما الخطوة التالية بنفسك - لا تسأل المستخدم
+4. بعد كل جولة، حلل النتائج وقرر ما الخطو�� التالية بنفسك - لا تسأل المستخدم
 5. استمر بتنفيذ أدوات إضافية بناءً على ما اكتشفته
 6. اتخذ قراراتك بشكل مستقل تماماً - أنت وكيل ذكي مستقل
 7. استمر حتى تستنفد كل الفحوصات المفيدة (حد أقصى 6 جولات)
@@ -852,6 +852,7 @@ const PROVIDER_CONFIGS: Record<string, { baseUrl: string; authHeader: (key: stri
   xai: { baseUrl: "https://api.x.ai/v1/chat/completions", authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
   deepseek: { baseUrl: "https://api.deepseek.com/chat/completions", authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
   groq: { baseUrl: "https://api.groq.com/openai/v1/chat/completions", authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
+  "gemini-free": { baseUrl: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", authHeader: (k) => ({}) },
 };
 
 // Default model per provider for fallback
@@ -862,12 +863,29 @@ const DEFAULT_MODELS: Record<string, string> = {
   xai: "grok-3-mini",
   deepseek: "deepseek-chat",
   groq: "llama-3.3-70b-versatile",
+  "gemini-free": "gemini-free",
 };
 
 async function callAI(messages: any[], tools: any[], stream: boolean, customProvider?: { providerId: string; modelId: string; apiKey: string; apiKeys?: string[] }) {
   if (customProvider && customProvider.apiKey) {
     const config = PROVIDER_CONFIGS[customProvider.providerId];
     if (!config) throw new Error(`مزود غير معروف: ${customProvider.providerId}`);
+    
+    // Special handling for Gemini Free (no API key needed)
+    if (customProvider.providerId === "gemini-free") {
+      const body: any = {
+        contents: messages.map((m: any) => ({
+          role: m.role === "system" ? "user" : m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }]
+        })),
+        generationConfig: { maxOutputTokens: 1024 }
+      };
+      return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyDyWJBhZDzQbEe-5KGHQDU0u-n75zVb_YU", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+    }
     
     const headers: Record<string, string> = { "Content-Type": "application/json", ...config.authHeader(customProvider.apiKey) };
     
@@ -896,15 +914,18 @@ async function callAI(messages: any[], tools: any[], stream: boolean, customProv
     return fetch(config.baseUrl, { method: "POST", headers, body: JSON.stringify(body) });
   }
   
-  // Default: Lovable AI
-  const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-  if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
-  const body: any = { model: "google/gemini-3-flash-preview", messages, stream, max_tokens: 1024 };
-  if (tools.length > 0 && !stream) body.tools = tools;
-  return fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+  // Default: Use Gemini Free (no API key needed)
+  const body: any = {
+    contents: messages.map((m: any) => ({
+      role: m.role === "system" ? "user" : m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }]
+    })),
+    generationConfig: { maxOutputTokens: 1024 }
+  };
+  return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyDyWJBhZDzQbEe-5KGHQDU0u-n75zVb_YU", {
     method: "POST",
-    headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
   });
 }
 
@@ -1080,10 +1101,6 @@ serve(async (req) => {
     const { messages, customSystemPrompt, customProvider, fallbackProviderKeys } = await req.json();
     
     // Validate we have either custom provider, fallback keys, or default key
-    if (!customProvider?.apiKey && !fallbackProviderKeys?.length && !Deno.env.get("LOVABLE_API_KEY")) {
-      throw new Error("No AI API key configured");
-    }
-
     // If no custom provider but fallback keys exist, build a customProvider from them
     let effectiveProvider = customProvider;
     if (!effectiveProvider?.apiKey && fallbackProviderKeys?.length > 0) {
@@ -1099,6 +1116,16 @@ serve(async (req) => {
         apiKey: firstProvider.keys[0],
         apiKeys: allKeys,
         allProviderKeys,
+      };
+    }
+
+    // Use Gemini Free as default if no provider configured
+    if (!effectiveProvider?.apiKey) {
+      effectiveProvider = {
+        providerId: "gemini-free",
+        modelId: "gemini-free",
+        apiKey: "free",
+        apiKeys: ["free"]
       };
     }
 
@@ -1223,8 +1250,24 @@ serve(async (req) => {
               break;
             }
 
-            const aiData = isAnthropic ? parseAnthropicResponse(await aiResponse.json()) : await aiResponse.json();
-            const assistantMsg = aiData.choices?.[0]?.message;
+            const responseJson = await aiResponse.json();
+            let aiData: any;
+            let assistantMsg: any;
+
+            // Handle different response formats
+            if (effectiveProvider?.providerId === "gemini-free") {
+              // Gemini response format: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
+              const geminiContent = responseJson.candidates?.[0]?.content?.parts?.[0]?.text || "";
+              aiData = {
+                choices: [{
+                  message: { content: geminiContent }
+                }]
+              };
+              assistantMsg = aiData.choices[0].message;
+            } else {
+              aiData = isAnthropic ? parseAnthropicResponse(responseJson) : responseJson;
+              assistantMsg = aiData.choices?.[0]?.message;
+            }
 
             let toolCalls = assistantMsg?.tool_calls || [];
             
