@@ -29,9 +29,9 @@ export function AgentSettingsDialog() {
   const [showKeys, setShowKeys] = useState<Record<string, Record<number, boolean>>>({});
   const { toast } = useToast();
 
-  const [providerEnabled, setProviderEnabled] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState("openai");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [providerEnabled, setProviderEnabled] = useState(true);
+  const [selectedProvider, setSelectedProvider] = useState("gemini");
+  const [selectedModel, setSelectedModel] = useState("gemini-direct");
   const [providerKeys, setProviderKeys] = useState<ProviderKeysMap>({});
   const [checkingKey, setCheckingKey] = useState<string | null>(null); // "providerId-index"
 
@@ -46,9 +46,9 @@ export function AgentSettingsDialog() {
           setSelectedModel(settings.modelId);
           setProviderKeys(settings.providerKeys || {});
         } else {
-          setProviderEnabled(false);
-          setSelectedProvider("openai");
-          setSelectedModel("");
+          setProviderEnabled(true);
+          setSelectedProvider("gemini");
+          setSelectedModel("gemini-direct");
           setProviderKeys({});
         }
       })();
@@ -263,7 +263,7 @@ export function AgentSettingsDialog() {
               تعريف الوكيل وشخصيته وقواعده
             </Label>
             <p className="text-xs text-muted-foreground">
-              اكتب هنا التعليمات المخصصة التي تريد أن يتبعها الوكيل.
+              اكت�� هنا التعليمات الم��صصة التي تريد أن يتبعها الوكيل.
             </p>
             <Textarea id="agent-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)}
               placeholder={`مثال:\nأنت خبير أمن سيبراني محترف اسمك "حارس".\nتتحدث بالعربية الفصحى فقط.\nتقدم تحليلات مفصلة مع توصيات عملية.`}
@@ -274,41 +274,52 @@ export function AgentSettingsDialog() {
           </TabsContent>
 
           <TabsContent value="ai" className="space-y-4 mt-4">
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
+            <div className="flex items-center justify-between p-3 rounded-lg border border-primary bg-primary/10">
               <div className="flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-primary" />
                 <div>
-                  <p className="text-sm font-medium text-foreground">استخدام مزود ذكاء مخصص</p>
-                  <p className="text-[11px] text-muted-foreground">بدلاً من المزود الافتراضي</p>
+                  <p className="text-sm font-medium text-primary">Gemini - مزود الذكاء الحصري</p>
+                  <p className="text-[11px] text-muted-foreground">Gemini هو المزود الوحيد المتاح</p>
                 </div>
               </div>
-              <Switch checked={providerEnabled} onCheckedChange={setProviderEnabled} />
+              <Switch checked={providerEnabled} disabled />
             </div>
 
             <div className="space-y-4">
-              {/* Provider Selection */}
-              <div className="space-y-2">
-                <Label className="text-foreground">اختر المزود النشط</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {AI_PROVIDERS.map(provider => {
-                    const keyCount = getProviderKeyCount(provider.id);
-                    return (
-                      <button key={provider.id} onClick={() => setSelectedProvider(provider.id)}
-                        className={`p-3 rounded-lg border text-sm font-medium transition-all text-center relative ${
-                          selectedProvider === provider.id
-                            ? "border-primary bg-primary/10 text-primary shadow-sm"
-                            : "border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                        }`}>
-                        <div className="font-semibold">{provider.name}</div>
-                        <div className="text-[10px] opacity-70">{provider.nameAr}</div>
-                        {keyCount > 0 && (
-                          <span className="absolute top-1 left-1 bg-primary text-primary-foreground text-[9px] rounded-full w-4 h-4 flex items-center justify-center">
-                            {keyCount}
-                          </span>
-                        )}
+              {/* Gemini Information */}
+              <div className="p-3 rounded-lg border border-border bg-card space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Google Gemini</p>
+                    <p className="text-[10px] text-muted-foreground">نموذج الذكاء الاصطناعي المتقدم من Google</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Summary of all providers with keys */}
+              {Object.keys(providerKeys).filter(pid => (providerKeys[pid] || []).some(k => k.key.trim())).length > 0 && (
+                <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-2">
+                  <Label className="text-foreground text-xs">مفاتيح المزودين</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {AI_PROVIDERS.filter(p => getProviderKeyCount(p.id) > 0).map(p => (
+                      <button key={p.id} onClick={() => setSelectedProvider(p.id)}
+                        className="text-[11px] px-2 py-1 rounded border border-border bg-card hover:border-primary/50 transition-colors flex items-center gap-1">
+                        <span>{p.name}</span>
+                        <span className="bg-primary/20 text-primary rounded-full px-1.5 text-[9px]">{getProviderKeyCount(p.id)}</span>
                       </button>
-                    );
-                  })}
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
+                <p>⚡ عند التفعيل، سيستخدم الوكيل المزود والموديل المختار بدل الافتراضي.</p>
+                <p>🔄 عند فشل مفتاح (انتهاء الرصيد أو خطأ)، يتم تجربة المفتاح التالي تلقائياً.</p>
+                <p>🔑 كل مزود يحتفظ بمفاتيحه بشكل مستقل.</p>
+              </div>
+            </div>
+                  <span className="text-[10px] bg-green-500/20 text-green-700 px-2 py-1 rounded">✓ جاهز</span>
                 </div>
               </div>
 
@@ -329,35 +340,30 @@ export function AgentSettingsDialog() {
                 </div>
               )}
 
-              {/* API Keys - per provider */}
-              <div className="space-y-2">
-                <p className="text-[10px] text-muted-foreground">
-                  كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح التالي تلقائياً.
-                </p>
-                {renderProviderKeys(selectedProvider)}
-              </div>
-
-              {/* Summary of all providers with keys */}
-              {Object.keys(providerKeys).filter(pid => pid !== selectedProvider && (providerKeys[pid] || []).some(k => k.key.trim())).length > 0 && (
-                <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-2">
-                  <Label className="text-foreground text-xs">مفاتيح المزودين الآخرين</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {AI_PROVIDERS.filter(p => p.id !== selectedProvider && getProviderKeyCount(p.id) > 0).map(p => (
-                      <button key={p.id} onClick={() => setSelectedProvider(p.id)}
-                        className="text-[11px] px-2 py-1 rounded border border-border bg-card hover:border-primary/50 transition-colors flex items-center gap-1">
-                        <span>{p.name}</span>
-                        <span className="bg-primary/20 text-primary rounded-full px-1.5 text-[9px]">{getProviderKeyCount(p.id)}</span>
-                      </button>
-                    ))}
-                  </div>
+              {/* API Keys - per provider - Optional for Gemini Python */}
+              {selectedModel !== "gemini-python" && (
+                <div className="space-y-2">
+                  <p className="text-[10px] text-muted-foreground">
+                    كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح ا��تالي تلقائياً.
+                  </p>
+                  {renderProviderKeys(selectedProvider)}
+                </div>
+              )}
+              {selectedModel === "gemini-python" && (
+                <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30 text-[11px] text-green-700 space-y-1">
+                  <p>✓ Gemini Python جاهز للاستخدام بدون مفاتيح API</p>
+                  <p>الاتصال يتم مباشرة بخوادم Google Gemini بدون أي متطلبات إضافية</p>
                 </div>
               )}
 
+
+
               {/* Info */}
               <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
-                <p>⚡ عند التفعيل، سيستخدم الوكيل المزود والموديل المختار بدل الافتراضي.</p>
-                <p>🔄 عند فشل مفتاح (انتهاء الرصيد أو خطأ)، يتم تجربة المفتاح التالي تلقائياً.</p>
-                <p>🔑 كل مزود يحتفظ بمفاتيحه بشكل مستقل.</p>
+                <p>🤖 Gemini Python هو مزود الذكاء الاصطناعي الحصري في هذا المشروع.</p>
+                <p>✅ يعمل بدون الحاجة لمفاتيح API أو معطيات خارجية.</p>
+                <p>⚡ الاتصال مباشر بخوادم Google Gemini - غير محدود وسريع.</p>
+                <p>∞ لا توجد حدود لعدد الطلبات أو الرموز.</p>
               </div>
             </div>
           </TabsContent>
