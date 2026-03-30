@@ -263,7 +263,7 @@ export function AgentSettingsDialog() {
               تعريف الوكيل وشخصيته وقواعده
             </Label>
             <p className="text-xs text-muted-foreground">
-              اكتب هنا التعليمات المخصصة التي تريد أن يتبعها الوكيل.
+              اكت�� هنا التعليمات المخصصة التي تريد أن يتبعها الوكيل.
             </p>
             <Textarea id="agent-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)}
               placeholder={`مثال:\nأنت خبير أمن سيبراني محترف اسمك "حارس".\nتتحدث بالعربية الفصحى فقط.\nتقدم تحليلات مفصلة مع توصيات عملية.`}
@@ -290,11 +290,10 @@ export function AgentSettingsDialog() {
               <div className="p-3 rounded-lg border border-border bg-card space-y-2">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-foreground">Google Gemini</p>
-                    <p className="text-[10px] text-muted-foreground">نموذج الذكاء الاصطناعي المتقدم من Google</p>
+                    <p className="text-sm font-medium text-foreground">Gemini Python (غير محدود)</p>
+                    <p className="text-[10px] text-muted-foreground">اتصال مباشر بخوادم Google بدون الحاجة لمفاتيح API</p>
                   </div>
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                    className="text-[11px] text-primary hover:underline">🔑 احصل على API Key</a>
+                  <span className="text-[10px] bg-green-500/20 text-green-700 px-2 py-1 rounded">✓ جاهز</span>
                 </div>
               </div>
 
@@ -315,22 +314,30 @@ export function AgentSettingsDialog() {
                 </div>
               )}
 
-              {/* API Keys - per provider */}
-              <div className="space-y-2">
-                <p className="text-[10px] text-muted-foreground">
-                  كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح التالي تلقائياً.
-                </p>
-                {renderProviderKeys(selectedProvider)}
-              </div>
+              {/* API Keys - per provider - Optional for Gemini Python */}
+              {selectedModel !== "gemini-python" && (
+                <div className="space-y-2">
+                  <p className="text-[10px] text-muted-foreground">
+                    كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح التالي تلقائياً.
+                  </p>
+                  {renderProviderKeys(selectedProvider)}
+                </div>
+              )}
+              {selectedModel === "gemini-python" && (
+                <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30 text-[11px] text-green-700 space-y-1">
+                  <p>✓ Gemini Python جاهز للاستخدام بدون مفاتيح API</p>
+                  <p>الاتصال يتم مباشرة بخوادم Google Gemini بدون أي متطلبات إضافية</p>
+                </div>
+              )}
 
 
 
               {/* Info */}
               <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
-                <p>🤖 Gemini هو مزود الذكاء الاصطناعي الحصري في هذا المشروع.</p>
-                <p>⚡ يتم استخدام Gemini تلقائياً لجميع طلبات الذكاء الاصطناعي.</p>
-                <p>🔄 عند فشل مفتاح (خطأ أو مشكلة)، يتم تجربة المفتاح التالي تلقائياً.</p>
-                <p>🔑 يمكنك إضافة عدة مفاتيح API لـ Gemini.</p>
+                <p>🤖 Gemini Python هو مزود الذكاء الاصطناعي الحصري في هذا المشروع.</p>
+                <p>✅ يعمل بدون الحاجة لمفاتيح API أو معطيات خارجية.</p>
+                <p>⚡ الاتصال مباشر بخوادم Google Gemini - غير محدود وسريع.</p>
+                <p>∞ لا توجد حدود لعدد الطلبات أو الرموز.</p>
               </div>
             </div>
           </TabsContent>
