@@ -24,12 +24,16 @@ const iconOptions = ["🔧", "⚡", "🛠️", "🔬", "🎯", "💣", "🕸️"
 
 export function AddToolDialog({ onToolsChanged }: AddToolDialogProps) {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<"create" | "manage" | "github">("create");
+  const [tab, setTab] = useState<"create" | "manage" | "github" | "import-code">("create");
   const [githubUrl, setGithubUrl] = useState("");
   const [importing, setImporting] = useState(false);
   const [tool, setTool] = useState(defaultTool);
   const [args, setArgs] = useState(defaultTool.args);
   const [customTools, setCustomTools] = useState<CustomToolDefinition[]>([]);
+  const [codeRepoUrl, setCodeRepoUrl] = useState("");
+  const [codeFilePath, setCodeFilePath] = useState("");
+  const [importingCode, setImportingCode] = useState(false);
+  const [codeName, setCodeName] = useState("");
   const { toast } = useToast();
 
   useEffect(() => {
@@ -113,19 +117,124 @@ export function AddToolDialog({ onToolsChanged }: AddToolDialogProps) {
           <DialogTitle className="text-sm font-display">إدارة الأدوات المخصصة</DialogTitle>
         </DialogHeader>
 
-        <div className="flex gap-1 p-1 bg-muted rounded-lg">
-          <button onClick={() => setTab("create")} className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-all ${tab === "create" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
-            إنشاء أداة
+        <div className="flex gap-1 p-1 bg-muted rounded-lg overflow-x-auto">
+          <button onClick={() => setTab("create")} className={`text-xs py-1.5 px-2 rounded-md font-medium transition-all whitespace-nowrap ${tab === "create" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
+            إنشاء
           </button>
-          <button onClick={() => setTab("github")} className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-all ${tab === "github" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
-            <span className="flex items-center justify-center gap-1"><Github className="w-3 h-3" /> GitHub</span>
+          <button onClick={() => setTab("import-code")} className={`text-xs py-1.5 px-2 rounded-md font-medium transition-all whitespace-nowrap flex items-center gap-1 ${tab === "import-code" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
+            <Github className="w-3 h-3" /> استيراد كود
           </button>
-          <button onClick={() => setTab("manage")} className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-all ${tab === "manage" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
+          <button onClick={() => setTab("github")} className={`text-xs py-1.5 px-2 rounded-md font-medium transition-all whitespace-nowrap flex items-center gap-1 ${tab === "github" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
+            <Github className="w-3 h-3" /> JSON
+          </button>
+          <button onClick={() => setTab("manage")} className={`text-xs py-1.5 px-2 rounded-md font-medium transition-all whitespace-nowrap ${tab === "manage" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}>
             الأدوات ({customTools.length})
           </button>
         </div>
 
-        {tab === "github" ? (
+        {tab === "import-code" ? (
+          <div className="space-y-3">
+            <p className="text-[11px] text-muted-foreground">استيراد أدوات حقيقية من GitHub وتنفيذها بدقة عالية. يدعم: JavaScript, Python, Bash, Go</p>
+            
+            <div>
+              <label className="text-[11px] text-muted-foreground mb-0.5 block">رابط المستودع (GitHub Repository)</label>
+              <input
+                type="text"
+                value={codeRepoUrl}
+                onChange={e => setCodeRepoUrl(e.target.value)}
+                placeholder="https://github.com/user/repo"
+                className="w-full bg-background border border-border rounded px-2 py-1.5 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+
+            <div>
+              <label className="text-[11px] text-muted-foreground mb-0.5 block">مسار الملف</label>
+              <input
+                type="text"
+                value={codeFilePath}
+                onChange={e => setCodeFilePath(e.target.value)}
+                placeholder="src/tools/my-tool.js"
+                className="w-full bg-background border border-border rounded px-2 py-1.5 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+
+            <div>
+              <label className="text-[11px] text-muted-foreground mb-0.5 block">اسم الأداة (اختياري)</label>
+              <input
+                type="text"
+                value={codeName}
+                onChange={e => setCodeName(e.target.value)}
+                placeholder="my-tool"
+                className="w-full bg-background border border-border rounded px-2 py-1.5 text-xs"
+              />
+            </div>
+
+            <div className="p-2 bg-muted/50 rounded-lg space-y-1">
+              <p className="text-[10px] text-muted-foreground font-medium">📝 صيغة الملف المدعومة:</p>
+              <pre className="text-[9px] text-muted-foreground font-mono overflow-x-auto" dir="ltr">{`/**
+ * @description وصف الأداة
+ * @param {string} target - الهدف المراد فحصه
+ * @param {number} timeout - المهلة الزمنية
+ * @returns {object} نتيجة التنفيذ
+ * @timeout 30000
+ */
+
+// رمز الأداة هنا
+const result = { success: true, data: target };
+return result;`}</pre>
+            </div>
+
+            <button
+              onClick={async () => {
+                if (!codeRepoUrl.trim() || !codeFilePath.trim()) {
+                  toast({ title: "خطأ", description: "أدخل رابط المستودع ومسار الملف", variant: "destructive" });
+                  return;
+                }
+                setImportingCode(true);
+                try {
+                  const token = localStorage.getItem("supabase_token");
+                  const response = await fetch("/api/tools/import-github", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({
+                      repoUrl: codeRepoUrl,
+                      filePath: codeFilePath,
+                      customName: codeName || undefined,
+                    }),
+                  });
+
+                  if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || "فشل الاستيراد");
+                  }
+
+                  const data = await response.json();
+                  onToolsChanged();
+                  await loadTools();
+                  toast({ title: "تم", description: `تم استيراد الأداة: ${data.tool.name}` });
+                  setCodeRepoUrl("");
+                  setCodeFilePath("");
+                  setCodeName("");
+                  setTab("manage");
+                } catch (err) {
+                  toast({ title: "خطأ", description: err instanceof Error ? err.message : "فشل الاستيراد", variant: "destructive" });
+                } finally {
+                  setImportingCode(false);
+                }
+              }}
+              disabled={importingCode}
+              className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg py-2 text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              {importingCode ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Github className="w-3.5 h-3.5" />}
+              {importingCode ? "جاري الاستيراد..." : "استيراد من GitHub"}
+            </button>
+          </div>
+        ) : tab === "github" ? (
           <div className="space-y-3">
             <p className="text-[11px] text-muted-foreground">أدخل رابط ملف JSON للأدوات من GitHub وسيتم استيرادها تلقائياً.</p>
             <div>
