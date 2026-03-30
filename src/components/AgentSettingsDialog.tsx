@@ -29,9 +29,9 @@ export function AgentSettingsDialog() {
   const [showKeys, setShowKeys] = useState<Record<string, Record<number, boolean>>>({});
   const { toast } = useToast();
 
-  const [providerEnabled, setProviderEnabled] = useState(true);
-  const [selectedProvider, setSelectedProvider] = useState("gemini");
-  const [selectedModel, setSelectedModel] = useState("gemini-2.5-pro");
+  const [providerEnabled, setProviderEnabled] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState("openai");
+  const [selectedModel, setSelectedModel] = useState("");
   const [providerKeys, setProviderKeys] = useState<ProviderKeysMap>({});
   const [checkingKey, setCheckingKey] = useState<string | null>(null); // "providerId-index"
 
@@ -290,9 +290,35 @@ export function AgentSettingsDialog() {
               <div className="p-3 rounded-lg border border-border bg-card space-y-2">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-foreground">Gemini Python (غير محدود)</p>
-                    <p className="text-[10px] text-muted-foreground">اتصال مباشر بخوادم Google بدون الحاجة لمفاتيح API</p>
+                    <p className="text-sm font-medium text-foreground">Google Gemini</p>
+                    <p className="text-[10px] text-muted-foreground">نموذج الذكاء الاصطناعي المتقدم من Google</p>
                   </div>
+                </div>
+              </div>
+
+              {/* Summary of all providers with keys */}
+              {Object.keys(providerKeys).filter(pid => (providerKeys[pid] || []).some(k => k.key.trim())).length > 0 && (
+                <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-2">
+                  <Label className="text-foreground text-xs">مفاتيح المزودين</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {AI_PROVIDERS.filter(p => getProviderKeyCount(p.id) > 0).map(p => (
+                      <button key={p.id} onClick={() => setSelectedProvider(p.id)}
+                        className="text-[11px] px-2 py-1 rounded border border-border bg-card hover:border-primary/50 transition-colors flex items-center gap-1">
+                        <span>{p.name}</span>
+                        <span className="bg-primary/20 text-primary rounded-full px-1.5 text-[9px]">{getProviderKeyCount(p.id)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
+                <p>⚡ عند التفعيل، سيستخدم الوكيل المزود والموديل المختار بدل الافتراضي.</p>
+                <p>🔄 عند فشل مفتاح (انتهاء الرصيد أو خطأ)، يتم تجربة المفتاح التالي تلقائياً.</p>
+                <p>🔑 كل مزود يحتفظ بمفاتيحه بشكل مستقل.</p>
+              </div>
+            </div>
                   <span className="text-[10px] bg-green-500/20 text-green-700 px-2 py-1 rounded">✓ جاهز</span>
                 </div>
               </div>
@@ -318,7 +344,7 @@ export function AgentSettingsDialog() {
               {selectedModel !== "gemini-python" && (
                 <div className="space-y-2">
                   <p className="text-[10px] text-muted-foreground">
-                    كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح التالي تلقائياً.
+                    كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح ا��تالي تلقائياً.
                   </p>
                   {renderProviderKeys(selectedProvider)}
                 </div>
