@@ -12,16 +12,12 @@ export interface AIProvider {
 export const AI_PROVIDERS: AIProvider[] = [
   {
     id: "gemini",
-    name: "Gemini",
-    nameAr: "جيميني",
+    name: "Gemini (Python)",
+    nameAr: "جيميني (بايثون)",
     baseUrl: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
-    apiKeyUrl: "https://aistudio.google.com/apikey",
+    apiKeyUrl: "https://support.google.com/gemini/answer/13584499",
     models: [
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-      { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
-      { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
-      { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
+      { id: "gemini-python", name: "Gemini (Unofficial Python Script)" },
     ],
   },
 ];
