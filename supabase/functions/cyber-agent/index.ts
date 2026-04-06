@@ -36,6 +36,8 @@ import {
   FeedbackResult,
   RiskAssessment,
 } from "../_shared/exploit-engine.ts";
+import { CheckpointManager } from "../_shared/checkpoint-manager.ts";
+import { IntentResolver } from "../_shared/intent-resolver.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -51,10 +53,11 @@ const MAX_STEPS_PER_REQUEST = 10; // Max steps in a single HTTP request
 const TOOL_TIMEOUT_MS = 30_000;
 
 interface AgentRequest {
-  action: 'start' | 'continue' | 'stop' | 'status' | 'approve_risk';
+  action: 'start' | 'continue' | 'stop' | 'status' | 'approve_risk' | 'resume';
   chatSessionId?: string;
   target?: string;
   intent?: string;
+  userIntent?: string; // For resume action (e.g., "واصل" or "continue")
   agentSessionId?: string;
   maxSteps?: number;
   // Exploit intelligence options
@@ -696,6 +699,148 @@ serve(async (req) => {
         });
       }
 
+      case 'resume': {
+        if (!agentSessionId || !chatSessionId) {
+          return new Response(JSON.stringify({ success: false, error: 'agentSessionId and chatSessionId are required' }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        // Resolve intent from user message
+        const intentResolver = new IntentResolver(supabase, chatSessionId);
+        const userIntentText = body.userIntent || 'واصل'; // Default to Arabic "continue"
+        const intentResolution = await intentResolver.resolveIntent(userIntentText, agentSessionId);
+
+        console.log('[v0] Resolved intent:', intentResolution);
+
+        // Get existing session
+        const session = await sessionManager.getSession(agentSessionId);
+        if (!session) {
+          return new Response(JSON.stringify({ success: false, error: 'Session not found' }), {
+            status: 404,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        // Initialize checkpoint manager
+        const checkpointManager = new CheckpointManager(supabase, agentSessionId);
+
+        // Try to recover from checkpoint
+        let resumeSession = session;
+        let recoveryInfo = null;
+
+        if (intentResolution.should_use_checkpoint) {
+          const recovery = await checkpointManager.recoverFromCheckpoint();
+          if (recovery) {
+            console.log('[v0] Recovering from checkpoint:', recovery);
+            checkpointManager.restoreSessionFromCheckpoint(resumeSession, recovery.checkpoint);
+            recoveryInfo = recovery;
+          }
+        }
+
+        // Stream response for real-time updates
+        const encoder = new TextEncoder();
+        const stream = new TransformStream();
+        const writer = stream.writable.getWriter();
+        
+        const send = async (text: string) => {
+          await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'progress', content: text })}\n\n`));
+        };
+
+        // Send resume info
+        await send(`Resuming session...\nIntent: ${intentResolution.action}\nLanguage: ${intentResolution.detected_language}\n`);
+        if (recoveryInfo) {
+          await send(`Recovered from checkpoint: ${recoveryInfo.next_action}\nSteps recovered: ${recoveryInfo.steps_recovered}\n\n`);
+        } else {
+          await send(`No checkpoint found. Continuing from current state.\n\n`);
+        }
+
+        // Exploit config from request
+        const exploitConfig: ExploitConfig = {
+          riskTolerance: body.riskTolerance || 'medium',
+          hasAuthorization: body.hasAuthorization || false,
+          isProduction: body.isProduction || false,
+        };
+
+        // Run agent loop in background
+        (async () => {
+          let currentSession = resumeSession;
+          let stepsThisRequest = 0;
+          const maxStepsThisRequest = maxSteps || MAX_STEPS_PER_REQUEST;
+          const requestStartTime = Date.now();
+          
+          try {
+            while (stepsThisRequest < maxStepsThisRequest) {
+              // Check for timeout (110s buffer)
+              if (checkpointManager.isApproachingTimeout(requestStartTime)) {
+                await send('\n⚠️ Approaching 120s timeout. Saving checkpoint...\n');
+                await checkpointManager.saveCheckpoint(currentSession, true);
+                break;
+              }
+
+              const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
+                currentSession,
+                supabase,
+                encoder,
+                (text) => send(text),
+                exploitConfig
+              );
+              
+              currentSession = updatedSession;
+              stepsThisRequest++;
+
+              // Save checkpoint every few steps
+              if (stepsThisRequest % 2 === 0) {
+                await checkpointManager.saveCheckpoint(currentSession, false);
+              }
+              
+              if (!shouldContinue) {
+                break;
+              }
+              
+              // Small delay to prevent overwhelming
+              await new Promise(r => setTimeout(r, 500));
+            }
+            
+            // Send final status
+            await send(`\n--- Session Status ---\n`);
+            await send(`Phase: ${currentSession.phase}\n`);
+            await send(`Steps: ${currentSession.step_count}/${currentSession.max_steps}\n`);
+            await send(`Findings: ${currentSession.findings.length}\n`);
+            await send(`Vulnerabilities: ${currentSession.context.vulnerabilities.length}\n`);
+            
+            if (currentSession.phase === 'DONE') {
+              await send(`\nSecurity Score: ${currentSession.security_score}/100\n`);
+              await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                type: 'complete', 
+                session: currentSession,
+                report: formatFindingsReport(currentSession),
+              })}\n\n`));
+            } else {
+              await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                type: 'paused', 
+                session: currentSession,
+                message: `Paused after ${stepsThisRequest} steps. Send 'resume' with 'واصل' to continue.`,
+              })}\n\n`));
+            }
+          } catch (e) {
+            console.error('Agent error:', e);
+            await send(`Error: ${e instanceof Error ? e.message : 'Unknown error'}\n`);
+            await checkpointManager.saveCheckpoint(currentSession, false); // Save state on error
+            await sessionManager.errorSession(currentSession.id, e instanceof Error ? e.message : 'Unknown error');
+            await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e instanceof Error ? e.message : 'Unknown error' })}\n\n`));
+          } finally {
+            await writer.write(encoder.encode('data: [DONE]\n\n'));
+            await writer.close();
+          }
+        })();
+
+        return new Response(stream.readable, {
+          headers: { ...corsHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+        });
+      }
+
       case 'continue': {
         if (!agentSessionId) {
           return new Response(JSON.stringify({ success: false, error: 'agentSessionId is required' }), {
@@ -741,14 +886,25 @@ serve(async (req) => {
           isProduction: body.isProduction || false,
         };
 
+        // Initialize checkpoint manager for timeout handling
+        const checkpointManager = new CheckpointManager(supabase, agentSessionId);
+
         // Run agent loop in background
         (async () => {
           let currentSession = session;
           let stepsThisRequest = 0;
           const maxStepsThisRequest = maxSteps || MAX_STEPS_PER_REQUEST;
+          const requestStartTime = Date.now();
           
           try {
             while (stepsThisRequest < maxStepsThisRequest) {
+              // Check for timeout (110s buffer before 120s limit)
+              if (checkpointManager.isApproachingTimeout(requestStartTime)) {
+                await send('\n⚠️ Approaching 120s timeout. Saving checkpoint before timeout...\n');
+                await checkpointManager.saveCheckpoint(currentSession, true);
+                break;
+              }
+
               const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
                 currentSession,
                 supabase,
@@ -759,6 +915,11 @@ serve(async (req) => {
               
               currentSession = updatedSession;
               stepsThisRequest++;
+
+              // Save checkpoint every 2 steps for recovery
+              if (stepsThisRequest % 2 === 0) {
+                await checkpointManager.saveCheckpoint(currentSession, false);
+              }
               
               if (!shouldContinue) {
                 break;
@@ -792,6 +953,8 @@ serve(async (req) => {
           } catch (e) {
             console.error('Agent error:', e);
             await send(`Error: ${e instanceof Error ? e.message : 'Unknown error'}\n`);
+            // Save checkpoint before marking as error for potential recovery
+            await checkpointManager.saveCheckpoint(currentSession, false);
             await sessionManager.errorSession(currentSession.id, e instanceof Error ? e.message : 'Unknown error');
             await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e instanceof Error ? e.message : 'Unknown error' })}\n\n`));
           } finally {

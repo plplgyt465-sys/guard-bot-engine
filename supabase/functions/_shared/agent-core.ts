@@ -425,6 +425,100 @@ export class AgentMemory {
 
     return data?.map(d => d.value) || [];
   }
+
+  /**
+   * Store semantic context for continuation
+   * Enables smarter resumption by storing what was being done
+   */
+  async storeSemanticContext(context: {
+    phase: AgentPhase;
+    action: string;
+    target: string;
+    findings: unknown[];
+    next_steps?: string[];
+  }): Promise<void> {
+    await this.setShortTerm('semantic_context', {
+      ...context,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Get semantic context for understanding continuation intent
+   */
+  getSemanticContext(): Record<string, unknown> | undefined {
+    const context = this.getShortTerm('semantic_context');
+    return context as Record<string, unknown> | undefined;
+  }
+
+  /**
+   * Store continuation hint for Arabic UI
+   */
+  async storeContinuationHint(hintAr: string, hintEn: string): Promise<void> {
+    await this.setShortTerm('continuation_hint', {
+      ar: hintAr,
+      en: hintEn,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Get continuation hint
+   */
+  getContinuationHint(): { ar: string; en: string } | undefined {
+    const hint = this.getShortTerm('continuation_hint') as { ar: string; en: string } | undefined;
+    return hint;
+  }
+
+  /**
+   * Store phase transition info for resumption
+   */
+  async storePhaseTransition(from: AgentPhase, to: AgentPhase, reason: string): Promise<void> {
+    const transitions = (this.getShortTerm('phase_transitions') as any[]) || [];
+    transitions.push({
+      from,
+      to,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+    // Keep only last 10 transitions
+    await this.setShortTerm('phase_transitions', transitions.slice(-10));
+  }
+
+  /**
+   * Get phase transition history
+   */
+  getPhaseTransitionHistory(): Array<{
+    from: AgentPhase;
+    to: AgentPhase;
+    reason: string;
+    timestamp: string;
+  }> {
+    const transitions = this.getShortTerm('phase_transitions');
+    return (transitions as any[]) || [];
+  }
+
+  /**
+   * Calculate a semantic similarity score between two contexts
+   * Helps detect if we're resuming the same task
+   */
+  calculateContextSimilarity(ctx1: Record<string, unknown>, ctx2: Record<string, unknown>): number {
+    if (!ctx1 || !ctx2) return 0;
+    
+    let matches = 0;
+    let total = 0;
+
+    // Check common keys
+    const keys = new Set([...Object.keys(ctx1), ...Object.keys(ctx2)]);
+    for (const key of keys) {
+      total++;
+      if (ctx1[key] === ctx2[key]) {
+        matches++;
+      }
+    }
+
+    return total > 0 ? matches / total : 0;
+  }
 }
 
 // ============================================================================

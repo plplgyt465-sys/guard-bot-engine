@@ -251,6 +251,155 @@ export async function stopAutonomousScan(agentSessionId: string): Promise<{ sess
 }
 
 /**
+ * Resume an autonomous agent session with continuation intent
+ * Supports Arabic commands like "واصل" (continue) and English "continue"
+ */
+export async function resumeAutonomousScan({
+  chatSessionId,
+  agentSessionId,
+  userIntent,
+  onProgress,
+  onComplete,
+  onError,
+}: {
+  chatSessionId: string;
+  agentSessionId: string;
+  userIntent: string; // User's continuation command (e.g., "واصل", "continue")
+  onProgress: (progress: AgentProgress) => void;
+  onComplete: (session: AgentSession, report: string) => void;
+  onError: (error: string) => void;
+}): Promise<{ sessionId: string; abort: () => void }> {
+  let aborted = false;
+
+  const abort = () => {
+    aborted = true;
+    if (agentSessionId) {
+      stopAutonomousScan(agentSessionId).catch(console.error);
+    }
+  };
+
+  try {
+    onProgress({ type: 'progress', content: `Resolving continuation intent: "${userIntent}"\n` });
+
+    // Resume the agent loop with intent resolution
+    while (!aborted) {
+      const resumeResponse = await fetch(AGENT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+        },
+        body: JSON.stringify({
+          action: 'resume',
+          agentSessionId,
+          chatSessionId,
+          userIntent,
+          maxSteps: 10,
+        }),
+      });
+
+      if (!resumeResponse.ok) {
+        const data = await resumeResponse.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to resume agent session');
+      }
+
+      // Handle streaming response
+      if (resumeResponse.body) {
+        const reader = resumeResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sessionComplete = false;
+
+        while (!aborted && !sessionComplete) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Process complete lines
+          let newlineIndex: number;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+
+            if (!line.startsWith('data: ')) continue;
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr === '[DONE]') continue;
+
+            try {
+              const parsed: AgentProgress = JSON.parse(jsonStr);
+              onProgress(parsed);
+
+              if (parsed.type === 'complete') {
+                sessionComplete = true;
+                if (parsed.session && parsed.report) {
+                  onComplete(parsed.session, parsed.report);
+                }
+                return { sessionId: agentSessionId, abort };
+              }
+
+              if (parsed.type === 'error') {
+                throw new Error(parsed.error || 'Agent error');
+              }
+
+              if (parsed.type === 'paused') {
+                // Session paused, user can send another resume command
+                break;
+              }
+            } catch (e) {
+              // Ignore parse errors for incomplete data
+            }
+          }
+        }
+
+        if (sessionComplete) break;
+      }
+
+      // Small delay before next iteration
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    return { sessionId: agentSessionId, abort };
+  } catch (e) {
+    onError(e instanceof Error ? e.message : 'Unknown error');
+    return { sessionId: agentSessionId, abort };
+  }
+}
+
+/**
+ * Check if message is a continuation command for resumed agent execution
+ * Supports Arabic: واصل, استمر, كمّل, تابع
+ * Supports English: continue, resume, proceed, go on, keep going
+ */
+export function isContinuationCommand(message: string): boolean {
+  const lowerMessage = message.toLowerCase().trim();
+  
+  // Arabic continuation patterns
+  const arabicPatterns = [
+    /^واصل/,           // continue
+    /^استمر/,          // resume
+    /^كمّل/,            // complete/continue
+    /^تابع/,            // proceed
+    /^أكمل/,            // continue
+  ];
+
+  // English continuation patterns
+  const englishPatterns = [
+    /^continue/i,
+    /^resume/i,
+    /^proceed/i,
+    /^go\s+on/i,
+    /^keep\s+going/i,
+    /^next/i,
+  ];
+
+  return (
+    arabicPatterns.some(p => p.test(lowerMessage)) ||
+    englishPatterns.some(p => p.test(lowerMessage))
+  );
+}
+
+/**
  * Get the status of an autonomous agent session
  */
 export async function getAgentStatus(params: { agentSessionId?: string; chatSessionId?: string }): Promise<AgentSession | null> {
