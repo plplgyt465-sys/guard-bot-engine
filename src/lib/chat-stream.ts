@@ -3,6 +3,309 @@ import { getAIProviderSettings } from "./ai-providers";
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
 const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/cyber-chat`;
+const AGENT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/cyber-agent`;
+
+// ============================================================================
+// AUTONOMOUS AGENT TYPES
+// ============================================================================
+
+export type AgentPhase = 'INTENT' | 'PLANNING' | 'EXECUTION' | 'ANALYSIS' | 'DECISION' | 'DONE' | 'ERROR';
+
+export interface AgentSession {
+  id: string;
+  chat_session_id: string;
+  target: string;
+  phase: AgentPhase;
+  plan: {
+    steps: Array<{
+      id: string;
+      tool: string;
+      args: Record<string, unknown>;
+      description: string;
+      status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+      result?: unknown;
+      error?: string;
+    }>;
+    current_step: number;
+    objective: string;
+  };
+  context: {
+    target: string;
+    intent: string;
+    discovered_info: Record<string, unknown>;
+    vulnerabilities: Array<{
+      id: string;
+      type: string;
+      severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+      description: string;
+      evidence?: string;
+    }>;
+    open_ports: number[];
+    services: Array<{ port: number; service: string; version?: string }>;
+    technologies: string[];
+  };
+  findings: unknown[];
+  tool_history: Array<{
+    tool: string;
+    args: Record<string, unknown>;
+    result: unknown;
+    timestamp: string;
+    duration_ms: number;
+    success: boolean;
+    error?: string;
+  }>;
+  step_count: number;
+  max_steps: number;
+  no_progress_count: number;
+  security_score: number | null;
+  started_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface AgentProgress {
+  type: 'progress' | 'complete' | 'paused' | 'error';
+  content?: string;
+  session?: AgentSession;
+  report?: string;
+  message?: string;
+  error?: string;
+}
+
+// ============================================================================
+// AUTONOMOUS AGENT FUNCTIONS
+// ============================================================================
+
+/**
+ * Start a new autonomous agent session
+ */
+export async function startAutonomousScan({
+  chatSessionId,
+  target,
+  intent,
+  onProgress,
+  onComplete,
+  onError,
+}: {
+  chatSessionId: string;
+  target: string;
+  intent?: string;
+  onProgress: (progress: AgentProgress) => void;
+  onComplete: (session: AgentSession, report: string) => void;
+  onError: (error: string) => void;
+}): Promise<{ sessionId: string; abort: () => void }> {
+  let aborted = false;
+  let agentSessionId: string | null = null;
+
+  const abort = () => {
+    aborted = true;
+    if (agentSessionId) {
+      stopAutonomousScan(agentSessionId).catch(console.error);
+    }
+  };
+
+  try {
+    // Step 1: Start the agent session
+    const startResponse = await fetch(AGENT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+      },
+      body: JSON.stringify({
+        action: 'start',
+        chatSessionId,
+        target,
+        intent,
+      }),
+    });
+
+    if (!startResponse.ok) {
+      const data = await startResponse.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to start agent session');
+    }
+
+    const startData = await startResponse.json();
+    if (!startData.success || !startData.session) {
+      throw new Error(startData.error || 'Failed to create agent session');
+    }
+
+    agentSessionId = startData.session.id;
+    onProgress({ type: 'progress', content: `Agent session started with ${startData.session.plan.steps.length} planned steps\n`, session: startData.session });
+
+    // Step 2: Continue the agent loop until complete
+    while (!aborted) {
+      const continueResponse = await fetch(AGENT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+        },
+        body: JSON.stringify({
+          action: 'continue',
+          agentSessionId,
+          maxSteps: 10,
+        }),
+      });
+
+      if (!continueResponse.ok) {
+        const data = await continueResponse.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to continue agent session');
+      }
+
+      // Handle streaming response
+      if (continueResponse.body) {
+        const reader = continueResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sessionComplete = false;
+
+        while (!aborted && !sessionComplete) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Process complete lines
+          let newlineIndex: number;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+
+            if (!line.startsWith('data: ')) continue;
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr === '[DONE]') continue;
+
+            try {
+              const parsed: AgentProgress = JSON.parse(jsonStr);
+              onProgress(parsed);
+
+              if (parsed.type === 'complete') {
+                sessionComplete = true;
+                if (parsed.session && parsed.report) {
+                  onComplete(parsed.session, parsed.report);
+                }
+                return { sessionId: agentSessionId, abort };
+              }
+
+              if (parsed.type === 'error') {
+                throw new Error(parsed.error || 'Agent error');
+              }
+
+              if (parsed.type === 'paused') {
+                // Session paused, will continue in next iteration
+                break;
+              }
+            } catch (e) {
+              // Ignore parse errors for incomplete data
+            }
+          }
+        }
+
+        if (sessionComplete) break;
+      }
+
+      // Small delay before next iteration
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    return { sessionId: agentSessionId, abort };
+  } catch (e) {
+    onError(e instanceof Error ? e.message : 'Unknown error');
+    return { sessionId: agentSessionId || '', abort };
+  }
+}
+
+/**
+ * Stop an autonomous agent session
+ */
+export async function stopAutonomousScan(agentSessionId: string): Promise<{ session: AgentSession | null; report: string | null }> {
+  try {
+    const response = await fetch(AGENT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+      },
+      body: JSON.stringify({
+        action: 'stop',
+        agentSessionId,
+      }),
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to stop agent session');
+    }
+
+    const data = await response.json();
+    return { session: data.session || null, report: data.report || null };
+  } catch (e) {
+    console.error('Failed to stop agent:', e);
+    return { session: null, report: null };
+  }
+}
+
+/**
+ * Get the status of an autonomous agent session
+ */
+export async function getAgentStatus(params: { agentSessionId?: string; chatSessionId?: string }): Promise<AgentSession | null> {
+  try {
+    const response = await fetch(AGENT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+      },
+      body: JSON.stringify({
+        action: 'status',
+        ...params,
+      }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    return data.session || null;
+  } catch (e) {
+    console.error('Failed to get agent status:', e);
+    return null;
+  }
+}
+
+/**
+ * Check if autonomous mode should be triggered based on user message
+ */
+export function shouldTriggerAutonomousMode(message: string): { trigger: boolean; target?: string } {
+  const lowerMessage = message.toLowerCase();
+  
+  // Patterns that indicate autonomous scan request
+  const autonomousPatterns = [
+    /(?:فحص|اختبار|تحليل)\s+(?:شامل|كامل|مستقل|autonomous)/i,
+    /(?:comprehensive|full|complete|autonomous)\s+(?:scan|test|assessment)/i,
+    /اختبر?\s+(?:بشكل\s+)?(?:مستقل|تلقائي|شامل)/i,
+    /افحص?\s+(?:بشكل\s+)?(?:مستقل|تلقائي|شامل)/i,
+    /run\s+autonomous/i,
+    /start\s+agent/i,
+    /ابدأ\s+(?:الوكيل|العميل)/i,
+  ];
+  
+  const isAutonomous = autonomousPatterns.some(p => p.test(message));
+  
+  if (!isAutonomous) {
+    return { trigger: false };
+  }
+  
+  // Extract target from message
+  const urlMatch = message.match(/https?:\/\/[^\s]+/i);
+  const domainMatch = message.match(/(?:^|\s)([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}(?:\s|$)/);
+  
+  const target = urlMatch?.[0] || domainMatch?.[0]?.trim();
+  
+  return { trigger: true, target };
+}
 
 export async function streamChat({
   messages,
