@@ -96,7 +96,6 @@ export interface AgentSession {
   findings: unknown[];
   tool_history: ToolExecution[];
   step_count: number;
-  no_progress_count: number;
   security_score: number | null;
   started_at: string;
   updated_at: string;
@@ -231,12 +230,10 @@ export class PhaseController {
 
 export interface LoopProtectionConfig {
   maxDuplicateTools: number;
-  maxNoProgressRounds: number;
 }
 
 const DEFAULT_LOOP_CONFIG: LoopProtectionConfig = {
-  maxDuplicateTools: 3,
-  maxNoProgressRounds: 5
+  maxDuplicateTools: 5
 };
 
 export class LoopProtection {
@@ -262,40 +259,11 @@ export class LoopProtection {
   }
 
   /**
-   * Check if agent is making no progress (same findings count for N rounds)
-   */
-  isNoProgressDetected(): boolean {
-    return this.session.no_progress_count >= this.config.maxNoProgressRounds;
-  }
-
-  /**
    * Increment step count
    */
   incrementStep(): number {
     this.session.step_count++;
     return this.session.step_count;
-  }
-
-  /**
-   * Update no-progress counter based on findings change
-   */
-  updateProgressCounter(newFindingsCount: number, previousFindingsCount: number): void {
-    if (newFindingsCount <= previousFindingsCount) {
-      this.session.no_progress_count++;
-    } else {
-      this.session.no_progress_count = 0; // Reset if progress made
-    }
-  }
-
-  /**
-   * Get a stop reason if any protection is triggered.
-   * Stops only when no progress is made for N consecutive rounds (duplicate tool loop).
-   */
-  getStopReason(): string | null {
-    if (this.isNoProgressDetected()) {
-      return `No progress detected for ${this.config.maxNoProgressRounds} consecutive rounds. All phases completed.`;
-    }
-    return null;
   }
 
   /**
@@ -305,7 +273,7 @@ export class LoopProtection {
     if (this.isDuplicateToolDetected(toolName)) {
       return {
         skip: true,
-        reason: `Tool "${toolName}" called ${this.config.maxDuplicateTools}+ times consecutively. Skipping to prevent loop.`
+        reason: `Tool "${toolName}" called ${this.config.maxDuplicateTools}+ times consecutively. Trying alternative approach.`
       };
     }
     return { skip: false };
@@ -478,16 +446,7 @@ export class DecisionEngine {
   }
 
   private initializeRules(): void {
-    // Rule 1: Stop if max steps reached
-    this.rules.push((ctx) => {
-      const stopReason = this.loopProtection.getStopReason();
-      if (stopReason) {
-        return { type: 'stop', reason: stopReason };
-      }
-      return null;
-    });
-
-    // Rule 2: If no ports found after port scan, try different approach
+    // Rule 1: If no ports found after port scan, try different approach
     this.rules.push((ctx) => {
       if (ctx.phase === 'ANALYSIS') {
         const portScanResults = ctx.session.tool_history.filter(t => t.tool === 'port_scan');
@@ -964,8 +923,7 @@ export class AgentSessionManager {
         context: initialContext,
         findings: [],
         tool_history: [],
-        step_count: 0,
-        no_progress_count: 0
+        step_count: 0
       })
       .select()
       .single();

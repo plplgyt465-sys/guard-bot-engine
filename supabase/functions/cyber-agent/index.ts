@@ -571,7 +571,6 @@ async function runAgentStep(
         findings: session.findings,
         tool_history: session.tool_history,
         step_count: session.step_count + 1,
-        no_progress_count: session.no_progress_count,
       });
       
       return { session: phaseController.getSession(), shouldContinue: true, decision, feedbackResult };
