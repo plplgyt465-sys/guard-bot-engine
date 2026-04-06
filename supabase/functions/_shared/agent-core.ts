@@ -9,6 +9,17 @@
  */
 
 import { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { 
+  ExploitIntelligence, 
+  ExploitMapper, 
+  ToolScoring, 
+  FeedbackLoop, 
+  RiskEngine,
+  ToolRecommendation,
+  FeedbackResult,
+  RiskAssessment,
+  Vulnerability
+} from "./exploit-engine.ts";
 
 // ============================================================================
 // TYPES
@@ -84,6 +95,12 @@ export interface Decision {
   tool_name?: string;
   tool_args?: Record<string, unknown>;
   new_plan?: AgentPlan;
+  // Exploit intelligence additions
+  risk_assessment?: RiskAssessment;
+  exploit_attempt_id?: string;
+  feedback_result?: FeedbackResult;
+  requires_approval?: boolean;
+  alternative_tools?: string[];
 }
 
 export interface MemoryEntry {
@@ -415,6 +432,12 @@ export interface DecisionContext {
   session: AgentSession;
   lastToolResult?: unknown;
   availableTools: string[];
+  // Exploit intelligence additions
+  currentVulnerability?: Vulnerability;
+  exploitPhase?: 'scan' | 'exploit' | 'verify' | 'post_exploit';
+  riskTolerance?: 'low' | 'medium' | 'high';
+  hasAuthorization?: boolean;
+  isProduction?: boolean;
 }
 
 type DecisionRule = (ctx: DecisionContext) => Decision | null;
@@ -423,11 +446,20 @@ export class DecisionEngine {
   private rules: DecisionRule[] = [];
   private supabase: SupabaseClient;
   private loopProtection: LoopProtection;
+  private exploitIntel: ExploitIntelligence;
 
   constructor(supabase: SupabaseClient, loopProtection: LoopProtection) {
     this.supabase = supabase;
     this.loopProtection = loopProtection;
+    this.exploitIntel = new ExploitIntelligence(supabase);
     this.initializeRules();
+  }
+
+  /**
+   * Get the exploit intelligence instance for external use
+   */
+  getExploitIntelligence(): ExploitIntelligence {
+    return this.exploitIntel;
   }
 
   private initializeRules(): void {
@@ -522,11 +554,128 @@ export class DecisionEngine {
       }
       return null;
     });
+
+    // =========================================================================
+    // EXPLOIT INTELLIGENCE RULES
+    // =========================================================================
+
+    // Rule 7: When vulnerability found, select best exploit tool
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'DECISION' && ctx.currentVulnerability) {
+        // This rule triggers async exploit selection - handled in decide() method
+        return null; // Let decide() handle async exploit selection
+      }
+      return null;
+    });
+
+    // Rule 8: High-severity vulnerability requires verification before exploit
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'DECISION') {
+        const { vulnerabilities } = ctx.session.context;
+        const unverifiedHighSeverity = vulnerabilities.filter(v => 
+          (v.severity === 'critical' || v.severity === 'high') && !v.confirmed
+        );
+        
+        if (unverifiedHighSeverity.length > 0) {
+          const vuln = unverifiedHighSeverity[0];
+          return {
+            type: 'run_tool',
+            reason: `High-severity vulnerability "${vuln.type}" needs verification before exploitation`,
+            tool_name: `${vuln.type}_verify`,
+            tool_args: { 
+              target: ctx.session.target, 
+              vuln_id: vuln.id,
+              evidence: vuln.evidence 
+            }
+          };
+        }
+      }
+      return null;
+    });
+
+    // Rule 9: After successful exploit, run post-exploitation
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'ANALYSIS' && ctx.exploitPhase === 'exploit') {
+        const lastExploit = ctx.session.tool_history
+          .filter(t => t.tool.includes('exploit') || t.tool.includes('inject'))
+          .pop();
+        
+        if (lastExploit?.success) {
+          return {
+            type: 'run_tool',
+            reason: 'Exploit successful, running post-exploitation to assess impact',
+            tool_name: 'impact_assessment',
+            tool_args: { 
+              target: ctx.session.target,
+              exploit_result: lastExploit.result 
+            }
+          };
+        }
+      }
+      return null;
+    });
+
+    // Rule 10: Blocked by risk - require approval for high-risk actions
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'DECISION') {
+        const { plan } = ctx.session;
+        const nextStep = plan.steps[plan.current_step];
+        
+        if (nextStep) {
+          const highRiskTools = ['sqlmap_scan', 'brute_force', 'exploit_execute', 'payload_inject'];
+          if (highRiskTools.includes(nextStep.tool)) {
+            // Check if we have authorization
+            if (!ctx.hasAuthorization) {
+              return {
+                type: 'escalate',
+                reason: `Tool "${nextStep.tool}" is high-risk and requires explicit authorization`,
+                tool_name: nextStep.tool,
+                requires_approval: true
+              };
+            }
+          }
+        }
+      }
+      return null;
+    });
+
+    // Rule 11: If previous tool failed, try alternative from exploit mapping
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'DECISION') {
+        const lastTool = ctx.session.tool_history[ctx.session.tool_history.length - 1];
+        
+        if (lastTool && !lastTool.success) {
+          // Mark this as needing async alternative lookup in decide()
+          return null; // Let decide() handle async alternative tool selection
+        }
+      }
+      return null;
+    });
+
+    // Rule 12: Respect risk tolerance - skip high-risk tools in low-tolerance mode
+    this.rules.push((ctx) => {
+      if (ctx.phase === 'DECISION' && ctx.riskTolerance === 'low') {
+        const { plan } = ctx.session;
+        const nextStep = plan.steps[plan.current_step];
+        
+        if (nextStep) {
+          const highRiskTools = ['sqlmap_scan', 'brute_force', 'exploit_execute', 
+                                  'payload_inject', 'shell_upload', 'privilege_escalate'];
+          if (highRiskTools.includes(nextStep.tool)) {
+            return {
+              type: 'skip',
+              reason: `Skipping high-risk tool "${nextStep.tool}" due to low risk tolerance setting`
+            };
+          }
+        }
+      }
+      return null;
+    });
   }
 
   /**
    * Make a decision based on current context
-   * First tries rules, then falls back to LLM if no rule matches
+   * First tries rules, then falls back to exploit intelligence, then LLM
    */
   async decide(ctx: DecisionContext): Promise<Decision> {
     // Try rules first
@@ -535,6 +684,25 @@ export class DecisionEngine {
       if (decision) {
         await this.logDecision(ctx.session.id, ctx.phase, decision);
         return decision;
+      }
+    }
+
+    // EXPLOIT INTELLIGENCE: If we have a current vulnerability to exploit
+    if (ctx.currentVulnerability && ctx.exploitPhase) {
+      const exploitDecision = await this.decideWithExploitIntelligence(ctx);
+      if (exploitDecision) {
+        await this.logDecision(ctx.session.id, ctx.phase, exploitDecision);
+        return exploitDecision;
+      }
+    }
+
+    // EXPLOIT INTELLIGENCE: If last tool failed, try alternatives
+    const lastTool = ctx.session.tool_history[ctx.session.tool_history.length - 1];
+    if (lastTool && !lastTool.success) {
+      const alternativeDecision = await this.decideAlternativeTool(ctx, lastTool);
+      if (alternativeDecision) {
+        await this.logDecision(ctx.session.id, ctx.phase, alternativeDecision);
+        return alternativeDecision;
       }
     }
 
@@ -552,11 +720,35 @@ export class DecisionEngine {
         };
       }
 
+      // EXPLOIT INTELLIGENCE: Assess risk before execution
+      const riskAssessment = await this.exploitIntel.risk.assessRisk(
+        ctx.session.id,
+        { type: 'tool_execution', toolId: nextStep.tool, target: ctx.session.target },
+        { 
+          isProduction: ctx.isProduction, 
+          hasAuthorization: ctx.hasAuthorization,
+          previousFailures: ctx.session.tool_history.filter(t => !t.success).length
+        }
+      );
+
+      // Block high-risk actions without approval
+      if (riskAssessment.requires_confirmation && !riskAssessment.approved_at) {
+        return {
+          type: 'escalate',
+          reason: `Tool "${nextStep.tool}" requires approval (risk: ${riskAssessment.risk_level})`,
+          tool_name: nextStep.tool,
+          tool_args: nextStep.args,
+          risk_assessment: riskAssessment,
+          requires_approval: true
+        };
+      }
+
       return {
         type: 'run_tool',
         reason: `Executing plan step ${plan.current_step + 1}: ${nextStep.description}`,
         tool_name: nextStep.tool,
-        tool_args: nextStep.args
+        tool_args: nextStep.args,
+        risk_assessment: riskAssessment
       };
     }
 
@@ -565,6 +757,135 @@ export class DecisionEngine {
       type: 'stop',
       reason: 'No more actions to take'
     };
+  }
+
+  /**
+   * Use exploit intelligence to select the best tool for a vulnerability
+   */
+  private async decideWithExploitIntelligence(ctx: DecisionContext): Promise<Decision | null> {
+    if (!ctx.currentVulnerability || !ctx.exploitPhase) {
+      return null;
+    }
+
+    const { recommendation, riskAssessment, proceed } = await this.exploitIntel.selectToolWithRiskCheck(
+      ctx.session.id,
+      ctx.currentVulnerability,
+      ctx.session.target,
+      {
+        phase: ctx.exploitPhase,
+        hasWebService: ctx.session.context.services.some(s => 
+          ['http', 'https', 'nginx', 'apache'].includes(s.service.toLowerCase())
+        ),
+        hasOpenPorts: ctx.session.context.open_ports.length > 0,
+        confirmedVuln: ctx.currentVulnerability.confirmed,
+        riskTolerance: ctx.riskTolerance || 'medium'
+      }
+    );
+
+    if (!recommendation) {
+      return {
+        type: 'skip',
+        reason: `No suitable tool found for vulnerability "${ctx.currentVulnerability.type}"`,
+        risk_assessment: riskAssessment
+      };
+    }
+
+    if (!proceed) {
+      return {
+        type: 'escalate',
+        reason: `Tool "${recommendation.tool_id}" requires approval: ${riskAssessment.risk_factors.join(', ')}`,
+        tool_name: recommendation.tool_id,
+        risk_assessment: riskAssessment,
+        requires_approval: true
+      };
+    }
+
+    return {
+      type: 'run_tool',
+      reason: `Selected "${recommendation.tool_id}" for ${ctx.currentVulnerability.type} (score: ${(recommendation.score * 100).toFixed(0)}%, ${recommendation.reason})`,
+      tool_name: recommendation.tool_id,
+      tool_args: { 
+        target: ctx.session.target, 
+        vuln_id: ctx.currentVulnerability.id,
+        vuln_type: ctx.currentVulnerability.type
+      },
+      risk_assessment: riskAssessment
+    };
+  }
+
+  /**
+   * Find alternative tools when primary tool fails
+   */
+  private async decideAlternativeTool(
+    ctx: DecisionContext, 
+    failedTool: { tool: string; error?: string }
+  ): Promise<Decision | null> {
+    // Try to infer vuln type from tool name
+    const vulnTypeMap: Record<string, string> = {
+      'xss_scan': 'xss', 'xss_exploit': 'xss', 'dalfox_scan': 'xss',
+      'sqli_scan': 'sqli', 'sqlmap_scan': 'sqli',
+      'lfi_scan': 'lfi', 'lfi_exploit': 'lfi',
+      'rfi_scan': 'rfi',
+      'cmd_injection_scan': 'command_injection',
+      'ssl_scan': 'ssl_weak',
+      'vuln_scan': 'generic'
+    };
+
+    const vulnType = vulnTypeMap[failedTool.tool] || 'generic';
+    
+    const alternatives = await this.exploitIntel.mapper.getAlternativeTools(
+      vulnType,
+      failedTool.tool,
+      { riskTolerance: ctx.riskTolerance || 'medium' }
+    );
+
+    if (alternatives.length === 0) {
+      return null; // No alternatives available
+    }
+
+    const bestAlternative = alternatives[0];
+    
+    return {
+      type: 'run_tool',
+      reason: `Primary tool "${failedTool.tool}" failed (${failedTool.error || 'unknown error'}). Trying alternative: ${bestAlternative.tool_id}`,
+      tool_name: bestAlternative.tool_id,
+      tool_args: { target: ctx.session.target },
+      alternative_tools: alternatives.slice(1).map(a => a.tool_id)
+    };
+  }
+
+  /**
+   * Process execution result through feedback loop
+   */
+  async processToolResult(
+    sessionId: string,
+    vuln: Vulnerability,
+    toolId: string,
+    result: { success: boolean; output: unknown; executionTimeMs: number; error?: string }
+  ): Promise<FeedbackResult> {
+    // Record the attempt and get feedback
+    const attemptId = await this.exploitIntel.feedback.recordAttempt(
+      sessionId,
+      vuln,
+      toolId,
+      { target: vuln.id }
+    );
+
+    const feedback = await this.exploitIntel.feedback.processResult(attemptId, {
+      success: result.success,
+      output: result.output as Record<string, unknown>,
+      executionTimeMs: result.executionTimeMs,
+      error: result.error
+    });
+
+    // Update tool scoring
+    await this.exploitIntel.scoring.recordExecution(toolId, {
+      success: result.success,
+      executionTimeMs: result.executionTimeMs,
+      error: result.error
+    });
+
+    return feedback;
   }
 
   private async logDecision(sessionId: string, phase: AgentPhase, decision: Decision): Promise<void> {

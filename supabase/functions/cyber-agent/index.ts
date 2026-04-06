@@ -30,6 +30,12 @@ import {
   ToolExecution,
   Decision,
 } from "../_shared/agent-core.ts";
+import {
+  ExploitIntelligence,
+  Vulnerability,
+  FeedbackResult,
+  RiskAssessment,
+} from "../_shared/exploit-engine.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -45,12 +51,19 @@ const MAX_STEPS_PER_REQUEST = 10; // Max steps in a single HTTP request
 const TOOL_TIMEOUT_MS = 30_000;
 
 interface AgentRequest {
-  action: 'start' | 'continue' | 'stop' | 'status';
+  action: 'start' | 'continue' | 'stop' | 'status' | 'approve_risk';
   chatSessionId?: string;
   target?: string;
   intent?: string;
   agentSessionId?: string;
   maxSteps?: number;
+  // Exploit intelligence options
+  riskTolerance?: 'low' | 'medium' | 'high';
+  hasAuthorization?: boolean;
+  isProduction?: boolean;
+  // Risk approval
+  riskAssessmentId?: string;
+  mitigations?: string[];
 }
 
 interface AgentResponse {
@@ -63,6 +76,17 @@ interface AgentResponse {
   phase?: AgentPhase;
   stepCount?: number;
   decision?: Decision;
+  // Exploit intelligence additions
+  riskAssessment?: RiskAssessment;
+  feedbackResult?: FeedbackResult;
+  exploitChain?: Array<{ vuln_type: string; tool_id: string; status: string }>;
+  pendingApprovals?: RiskAssessment[];
+  riskSummary?: {
+    total: number;
+    byLevel: Record<string, number>;
+    pendingApproval: number;
+    highRiskActions: number;
+  };
 }
 
 // Execute a security tool by calling cyber-execute
@@ -265,17 +289,26 @@ function analyzeToolResult(
   return { updatedContext, findings };
 }
 
+// Configuration for exploit intelligence
+interface ExploitConfig {
+  riskTolerance: 'low' | 'medium' | 'high';
+  hasAuthorization: boolean;
+  isProduction: boolean;
+}
+
 // Main agent loop - processes one iteration and returns
 async function runAgentStep(
   session: AgentSession,
   supabase: ReturnType<typeof createClient>,
   encoder: TextEncoder,
-  send: (text: string) => void
-): Promise<{ session: AgentSession; shouldContinue: boolean; decision: Decision }> {
+  send: (text: string) => void,
+  exploitConfig: ExploitConfig = { riskTolerance: 'medium', hasAuthorization: false, isProduction: false }
+): Promise<{ session: AgentSession; shouldContinue: boolean; decision: Decision; feedbackResult?: FeedbackResult }> {
   const phaseController = new PhaseController(session, supabase);
   const loopProtection = new LoopProtection(session);
   const memory = new AgentMemory(session, supabase);
   const decisionEngine = new DecisionEngine(supabase, loopProtection);
+  const exploitIntel = decisionEngine.getExploitIntelligence();
   
   // Load memory cache
   await memory.loadShortTermCache();
@@ -301,11 +334,35 @@ async function runAgentStep(
     'cors_test', 'clickjacking_test', 'dir_bruteforce', 'cve_search',
   ];
   
-  // Make a decision
+  // Determine current vulnerability being targeted (if any)
+  const unprocessedVulns = session.context.vulnerabilities.filter(v => !v.exploited && v.confirmed);
+  const currentVulnerability = unprocessedVulns.length > 0 ? unprocessedVulns[0] as Vulnerability : undefined;
+  
+  // Determine exploit phase based on session state
+  let exploitPhase: 'scan' | 'exploit' | 'verify' | 'post_exploit' | undefined;
+  if (currentVulnerability) {
+    const attemptedExploits = session.tool_history.filter(t => 
+      t.tool.includes('exploit') || t.tool.includes('inject')
+    );
+    if (attemptedExploits.length === 0) {
+      exploitPhase = 'scan';
+    } else if (attemptedExploits.some(t => t.success)) {
+      exploitPhase = 'post_exploit';
+    } else {
+      exploitPhase = 'exploit';
+    }
+  }
+
+  // Make a decision with exploit intelligence context
   const decision = await decisionEngine.decide({
     phase: currentPhase,
     session,
     availableTools,
+    currentVulnerability,
+    exploitPhase,
+    riskTolerance: exploitConfig.riskTolerance,
+    hasAuthorization: exploitConfig.hasAuthorization,
+    isProduction: exploitConfig.isProduction,
   });
   
   send(`Decision: ${decision.type} - ${decision.reason}\n`);
@@ -330,6 +387,14 @@ async function runAgentStep(
         
         await phaseController.updateSession({ plan: session.plan });
         return { session, shouldContinue: true, decision };
+      }
+      
+      // Log risk assessment if present
+      if (decision.risk_assessment) {
+        send(`Risk Assessment: ${decision.risk_assessment.risk_level} (score: ${(decision.risk_assessment.risk_score * 100).toFixed(0)}%)\n`);
+        if (decision.risk_assessment.risk_factors.length > 0) {
+          send(`Risk Factors: ${decision.risk_assessment.risk_factors.join(', ')}\n`);
+        }
       }
       
       // Transition to EXECUTION phase
@@ -357,6 +422,28 @@ async function runAgentStep(
       // Store in memory
       await memory.storeToolResult(decision.tool_name, decision.tool_args || {}, toolResult.result);
       
+      // Process through feedback loop if we're targeting a vulnerability
+      let feedbackResult: FeedbackResult | undefined;
+      if (currentVulnerability) {
+        feedbackResult = await decisionEngine.processToolResult(
+          session.id,
+          currentVulnerability,
+          decision.tool_name!,
+          {
+            success: toolResult.success,
+            output: toolResult.result,
+            executionTimeMs: toolResult.duration_ms,
+            error: toolResult.error,
+          }
+        );
+        
+        send(`Feedback: ${feedbackResult.next_action} - ${feedbackResult.reason} (confidence: ${(feedbackResult.confidence * 100).toFixed(0)}%)\n`);
+        
+        if (feedbackResult.alternative_tools.length > 0) {
+          send(`Alternative tools available: ${feedbackResult.alternative_tools.join(', ')}\n`);
+        }
+      }
+      
       if (toolResult.success) {
         send(`Result: ${JSON.stringify(toolResult.result).slice(0, 500)}\n`);
         
@@ -365,7 +452,7 @@ async function runAgentStep(
         
         // Analyze the result
         const previousFindingsCount = session.context.vulnerabilities.length;
-        const { updatedContext, findings } = analyzeToolResult(session.context, decision.tool_name, toolResult.result);
+        const { updatedContext, findings } = analyzeToolResult(session.context, decision.tool_name!, toolResult.result);
         
         session.context = updatedContext;
         session.findings.push(...findings);
@@ -377,6 +464,11 @@ async function runAgentStep(
           send(`Finding: ${finding}\n`);
         }
         
+        // Handle feedback loop verification
+        if (feedbackResult?.next_action === 'verify') {
+          send(`Verification required for high-confidence exploit result\n`);
+        }
+        
         // Mark step as completed
         if (session.plan.current_step < session.plan.steps.length) {
           session.plan.steps[session.plan.current_step].status = 'completed';
@@ -385,6 +477,11 @@ async function runAgentStep(
         }
       } else {
         send(`Error: ${toolResult.error}\n`);
+        
+        // Handle feedback loop retry
+        if (feedbackResult?.next_action === 'retry_alternative' && feedbackResult.alternative_tools.length > 0) {
+          send(`Will try alternative tool: ${feedbackResult.alternative_tools[0]}\n`);
+        }
         
         // Mark step as failed
         if (session.plan.current_step < session.plan.steps.length) {
@@ -407,7 +504,37 @@ async function runAgentStep(
         no_progress_count: session.no_progress_count,
       });
       
-      return { session: phaseController.getSession(), shouldContinue: true, decision };
+      return { session: phaseController.getSession(), shouldContinue: true, decision, feedbackResult };
+    }
+    
+    case 'escalate': {
+      // Handle escalation - requires user approval
+      send(`ESCALATION REQUIRED: ${decision.reason}\n`);
+      if (decision.risk_assessment) {
+        send(`Risk Level: ${decision.risk_assessment.risk_level}\n`);
+        send(`Risk Factors: ${decision.risk_assessment.risk_factors.join(', ')}\n`);
+      }
+      
+      // Pause the session and wait for approval
+      await phaseController.updateSession({
+        context: {
+          ...session.context,
+          discovered_info: {
+            ...session.context.discovered_info,
+            pending_approval: {
+              tool: decision.tool_name,
+              risk_assessment_id: decision.risk_assessment?.id,
+              reason: decision.reason,
+            }
+          }
+        }
+      });
+      
+      return { 
+        session: phaseController.getSession(), 
+        shouldContinue: false, 
+        decision,
+      };
     }
     
     case 'stop': {
@@ -535,6 +662,13 @@ serve(async (req) => {
           await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'progress', content: text })}\n\n`));
         };
 
+        // Exploit config from request
+        const exploitConfig: ExploitConfig = {
+          riskTolerance: body.riskTolerance || 'medium',
+          hasAuthorization: body.hasAuthorization || false,
+          isProduction: body.isProduction || false,
+        };
+
         // Run agent loop in background
         (async () => {
           let currentSession = session;
@@ -543,11 +677,12 @@ serve(async (req) => {
           
           try {
             while (stepsThisRequest < maxStepsThisRequest) {
-              const { session: updatedSession, shouldContinue, decision } = await runAgentStep(
+              const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
                 currentSession,
                 supabase,
                 encoder,
-                (text) => send(text)
+                (text) => send(text),
+                exploitConfig
               );
               
               currentSession = updatedSession;
@@ -653,10 +788,44 @@ serve(async (req) => {
           });
         }
 
+        // Get exploit intelligence data
+        const exploitIntel = new ExploitIntelligence(supabase);
+        const riskSummary = await exploitIntel.risk.getRiskSummary(session.id);
+        const pendingApprovals = await exploitIntel.risk.getPendingAssessments(session.id);
+        const exploitChain = await exploitIntel.feedback.getExploitChain(session.id);
+
         return new Response(JSON.stringify({
           success: true,
           session,
           report: session.phase === 'DONE' ? formatFindingsReport(session) : undefined,
+          riskSummary,
+          pendingApprovals,
+          exploitChain: exploitChain.map(e => ({
+            vuln_type: e.vuln_type,
+            tool_id: e.tool_id,
+            status: e.status,
+          })),
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      case 'approve_risk': {
+        const { riskAssessmentId, mitigations } = body;
+        
+        if (!riskAssessmentId) {
+          return new Response(JSON.stringify({ success: false, error: 'riskAssessmentId is required' }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        const exploitIntel = new ExploitIntelligence(supabase);
+        await exploitIntel.risk.approveRisk(riskAssessmentId, mitigations || []);
+
+        return new Response(JSON.stringify({
+          success: true,
+          message: 'Risk approved. The agent can now continue.',
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
