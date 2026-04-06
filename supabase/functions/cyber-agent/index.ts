@@ -29,6 +29,10 @@ import {
   formatFindingsReport,
   ToolExecution,
   Decision,
+  // Autonomous Loop Engine
+  AutonomousLoopOrchestrator,
+  ExecutionNode,
+  ExecutionGraph,
 } from "../_shared/agent-core.ts";
 import {
   ExploitIntelligence,
@@ -54,6 +58,7 @@ interface AgentRequest {
   chatSessionId?: string;
   target?: string;
   intent?: string;
+  message?: string; // Natural language message (for intent resolution)
   agentSessionId?: string;
   // Exploit intelligence options
   riskTolerance?: 'low' | 'medium' | 'high';
@@ -62,6 +67,10 @@ interface AgentRequest {
   // Risk approval
   riskAssessmentId?: string;
   mitigations?: string[];
+  // Autonomous Loop Engine options
+  useAutonomousLoop?: boolean; // Enable DAG-based execution
+  enableCheckpoints?: boolean; // Enable automatic checkpointing
+  enableIdempotency?: boolean; // Enable hash-based caching
 }
 
 interface AgentResponse {
@@ -644,6 +653,186 @@ async function runAgentStep(
     default:
       return { session, shouldContinue: false, decision: { type: 'stop', reason: 'Unknown decision type' } };
   }
+}
+
+// ============================================================================
+// DAG-BASED AUTONOMOUS LOOP
+// Uses ExecutionGraph for dependency-aware execution with checkpoints
+// ============================================================================
+
+interface DAGLoopResult {
+  session: AgentSession;
+  completed: boolean;
+  nodesExecuted: number;
+  nodesFromCache: number;
+  checkpointsCreated: number;
+  error?: string;
+}
+
+async function runDAGLoop(
+  orchestrator: AutonomousLoopOrchestrator,
+  supabase: ReturnType<typeof createClient>,
+  send: (text: string) => void,
+  exploitConfig: ExploitConfig
+): Promise<DAGLoopResult> {
+  const session = orchestrator.getSession();
+  if (!session) {
+    throw new Error('Session not initialized');
+  }
+
+  let graph = orchestrator.getGraph();
+  
+  // Build graph from plan if not already built
+  if (!graph) {
+    graph = orchestrator.buildGraph(session);
+    send(`[GRAPH] Built execution graph with ${graph.nodes.size} nodes\n`);
+    
+    // Show dependency structure
+    const stats = orchestrator.getGraphStats();
+    if (stats) {
+      send(`[GRAPH] Ready: ${stats.ready}, Pending: ${stats.pending}\n`);
+    }
+  }
+
+  let nodesExecuted = 0;
+  let nodesFromCache = 0;
+  let checkpointsCreated = 0;
+  let stepCount = session.step_count;
+
+  // Main DAG execution loop
+  while (!orchestrator.isGraphComplete()) {
+    // Get nodes ready for execution
+    const readyNodes = orchestrator.getReadyNodes();
+    
+    if (readyNodes.length === 0) {
+      // Check for failures blocking progress
+      const stats = orchestrator.getGraphStats();
+      if (stats && stats.failed > 0 && stats.pending > 0) {
+        send(`[GRAPH] Execution blocked - ${stats.failed} failed nodes preventing progress\n`);
+        break;
+      }
+      
+      // No more work to do
+      send(`[GRAPH] No ready nodes - execution complete\n`);
+      break;
+    }
+
+    send(`\n[STEP ${stepCount + 1}] ${readyNodes.length} node(s) ready for execution\n`);
+
+    // Execute ready nodes (potentially in parallel in future)
+    for (const node of readyNodes) {
+      send(`[EXECUTE] ${node.tool} (${node.id.substring(0, 8)}...)\n`);
+
+      // Check if risky - create checkpoint before
+      if (orchestrator.isRiskyOperation(node.tool)) {
+        send(`[CHECKPOINT] Pre-risk checkpoint for ${node.tool}\n`);
+        const cpResult = await orchestrator.maybeCreateCheckpoint(stepCount, true, false);
+        if (cpResult?.created) {
+          checkpointsCreated++;
+        }
+      }
+
+      // Execute node with idempotency
+      const result = await orchestrator.executeNode(node, async (tool, args) => {
+        const toolResult = await executeTool(tool, args);
+        if (!toolResult.success) {
+          throw new Error(toolResult.error || 'Tool execution failed');
+        }
+        return toolResult.result;
+      });
+
+      nodesExecuted++;
+      if (result.fromCache) {
+        nodesFromCache++;
+        send(`[CACHE] Hit - using cached result (${result.durationMs}ms)\n`);
+      } else {
+        send(`[RESULT] ${result.success ? 'Success' : 'Failed'} (${result.durationMs}ms)\n`);
+      }
+
+      if (!result.success) {
+        send(`[ERROR] ${result.error}\n`);
+        
+        // Create error checkpoint
+        const cpResult = await orchestrator.maybeCreateCheckpoint(stepCount, false, true);
+        if (cpResult?.created) {
+          checkpointsCreated++;
+          send(`[CHECKPOINT] Error checkpoint created\n`);
+        }
+      } else {
+        // Analyze result and update context
+        const { updatedContext, findings } = analyzeToolResult(
+          session.context,
+          result.tool,
+          result.result
+        );
+        session.context = updatedContext;
+        
+        for (const finding of findings) {
+          send(`[FINDING] ${finding}\n`);
+          session.findings.push(finding);
+        }
+      }
+
+      stepCount++;
+
+      // Periodic checkpoint
+      const cpResult = await orchestrator.maybeCreateCheckpoint(stepCount, false, false);
+      if (cpResult?.created) {
+        checkpointsCreated++;
+        send(`[CHECKPOINT] Periodic checkpoint v${cpResult.checkpoint.version}\n`);
+      }
+    }
+
+    // Update session state
+    await supabase
+      .from('agent_sessions')
+      .update({
+        context: session.context,
+        findings: session.findings,
+        step_count: stepCount,
+      })
+      .eq('id', session.id);
+  }
+
+  // Persist final graph state
+  await orchestrator.persistGraph();
+
+  // Final statistics
+  const finalStats = orchestrator.getGraphStats();
+  const cacheStats = orchestrator.getCacheStats();
+  const memoryStats = orchestrator.getMemoryStats();
+
+  send(`\n[COMPLETE] DAG Execution Summary:\n`);
+  send(`  Nodes: ${finalStats?.completed || 0}/${finalStats?.total || 0} completed\n`);
+  send(`  Failed: ${finalStats?.failed || 0}\n`);
+  send(`  Cache hits: ${nodesFromCache}/${nodesExecuted}\n`);
+  send(`  Checkpoints: ${checkpointsCreated}\n`);
+  if (memoryStats) {
+    send(`  Memory entries: ${memoryStats.totalCount}\n`);
+  }
+
+  // Calculate security score
+  const securityScore = calculateSecurityScore(session.context);
+  session.security_score = securityScore;
+
+  await supabase
+    .from('agent_sessions')
+    .update({
+      phase: 'DONE',
+      security_score: securityScore,
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', session.id);
+
+  session.phase = 'DONE';
+
+  return {
+    session,
+    completed: orchestrator.isGraphComplete(),
+    nodesExecuted,
+    nodesFromCache,
+    checkpointsCreated,
+  };
 }
 
 serve(async (req) => {

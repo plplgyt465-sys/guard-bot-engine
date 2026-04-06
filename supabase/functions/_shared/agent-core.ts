@@ -32,6 +32,47 @@ import {
   FailurePattern
 } from "./exploit-brain.ts";
 
+// Autonomous Loop Engine imports
+import { 
+  ExecutionGraphManager, 
+  ExecutionGraph, 
+  ExecutionNode,
+  NodeStatus 
+} from "./execution-graph.ts";
+import { 
+  IdempotencyManager, 
+  IdempotencyCheckResult 
+} from "./idempotency-manager.ts";
+import { 
+  ReplayEngine, 
+  ExecutedAction, 
+  StateSnapshot,
+  Checkpoint,
+  RestoredState 
+} from "./replay-engine.ts";
+import { 
+  UnifiedMemoryManager, 
+  MemoryEntry,
+  MemoryType,
+  MemoryLayer 
+} from "./memory-index.ts";
+import { 
+  CheckpointManager, 
+  CheckpointResult,
+  CheckpointReason 
+} from "./checkpoint-manager.ts";
+import { 
+  IntentResolver, 
+  ResolvedIntent,
+  IntentType 
+} from "./intent-resolver.ts";
+import { 
+  SemanticMemoryManager, 
+  FailurePattern as SemanticFailurePattern,
+  FailureType,
+  MitigationStrategy 
+} from "./semantic-memory.ts";
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -1417,3 +1458,569 @@ export {
   ExploitChainBuilder,
   StrategyAdaptor
 } from "./exploit-brain.ts";
+
+// ============================================================================
+// AUTONOMOUS LOOP ORCHESTRATOR
+// Central coordinator for all autonomous loop engine components
+// ============================================================================
+
+export interface AutonomousLoopConfig {
+  checkpointInterval: number;      // Steps between checkpoints
+  maxParallelNodes: number;        // Max nodes to execute in parallel
+  enableIdempotency: boolean;      // Use hash-based caching
+  enableReplay: boolean;           // Record for replay
+  enableSemanticLearning: boolean; // Learn from failures/successes
+}
+
+const DEFAULT_LOOP_CONFIG: AutonomousLoopConfig = {
+  checkpointInterval: 2,
+  maxParallelNodes: 3,
+  enableIdempotency: true,
+  enableReplay: true,
+  enableSemanticLearning: true
+};
+
+export interface LoopState {
+  session: AgentSession;
+  graph: ExecutionGraph;
+  memory: UnifiedMemoryManager;
+  isResumed: boolean;
+  lastCheckpoint: Checkpoint | null;
+  currentStep: number;
+}
+
+export interface StepExecutionResult {
+  nodeId: string;
+  tool: string;
+  success: boolean;
+  result: unknown;
+  fromCache: boolean;
+  durationMs: number;
+  error?: string;
+}
+
+/**
+ * AutonomousLoopOrchestrator
+ * 
+ * Coordinates all autonomous loop engine components:
+ * - ExecutionGraphManager: DAG-based step tracking
+ * - IdempotencyManager: Hash-based caching
+ * - ReplayEngine: Deterministic resume
+ * - UnifiedMemoryManager: Cross-layer memory
+ * - CheckpointManager: State persistence
+ * - IntentResolver: Arabic/English intent detection
+ * - SemanticMemoryManager: Pattern learning
+ */
+export class AutonomousLoopOrchestrator {
+  private supabase: SupabaseClient;
+  private config: AutonomousLoopConfig;
+  
+  // Core managers
+  private graphManager: ExecutionGraphManager;
+  private idempotencyManager: IdempotencyManager;
+  private replayEngine: ReplayEngine;
+  private checkpointManager: CheckpointManager;
+  private intentResolver: IntentResolver;
+  private semanticMemory: SemanticMemoryManager;
+  
+  // Session-specific
+  private memoryManager: UnifiedMemoryManager | null = null;
+  private currentGraph: ExecutionGraph | null = null;
+  private currentSession: AgentSession | null = null;
+
+  constructor(supabase: SupabaseClient, config?: Partial<AutonomousLoopConfig>) {
+    this.supabase = supabase;
+    this.config = { ...DEFAULT_LOOP_CONFIG, ...config };
+    
+    // Initialize managers
+    this.graphManager = new ExecutionGraphManager(supabase);
+    this.idempotencyManager = new IdempotencyManager(supabase);
+    this.replayEngine = new ReplayEngine(supabase);
+    this.checkpointManager = new CheckpointManager(supabase, this.replayEngine, {
+      periodicInterval: this.config.checkpointInterval
+    });
+    this.intentResolver = new IntentResolver(supabase);
+    this.semanticMemory = new SemanticMemoryManager(supabase);
+  }
+
+  /**
+   * Initialize or resume a session
+   */
+  async initializeSession(
+    chatSessionId: string,
+    message: string,
+    sessionManager: AgentSessionManager
+  ): Promise<{ state: LoopState; intent: ResolvedIntent }> {
+    // Resolve intent
+    const intent = this.intentResolver.resolve(message);
+    
+    let session: AgentSession | null = null;
+    let isResumed = false;
+    let lastCheckpoint: Checkpoint | null = null;
+
+    // Check for continuation intent
+    if (intent.shouldResume) {
+      // Try to find existing session
+      const existingSessionId = await this.intentResolver.selectSessionForContinuation(
+        chatSessionId,
+        intent.sessionSelector
+      );
+
+      if (existingSessionId) {
+        // Restore from checkpoint
+        const restoreResult = await this.checkpointManager.restoreFromCheckpoint(existingSessionId);
+        
+        if (restoreResult.success && restoreResult.state) {
+          session = restoreResult.state.session;
+          this.currentGraph = restoreResult.state.graph;
+          lastCheckpoint = await this.checkpointManager.getLastCheckpoint(existingSessionId);
+          isResumed = true;
+          
+          console.log(`[ORCHESTRATOR] Resumed session ${existingSessionId} from checkpoint`);
+          
+          // Restore memory
+          this.memoryManager = new UnifiedMemoryManager(this.supabase, session.id);
+          this.memoryManager.deserialize(restoreResult.state.memoryData);
+        }
+      }
+    }
+
+    // Create new session if not resuming
+    if (!session) {
+      const target = intent.target || this.extractTarget(message);
+      if (!target) {
+        throw new Error('No target specified for new session');
+      }
+
+      session = await sessionManager.createSession(chatSessionId, target, message);
+      isResumed = false;
+      
+      // Initialize fresh memory
+      this.memoryManager = new UnifiedMemoryManager(this.supabase, session.id);
+      
+      console.log(`[ORCHESTRATOR] Created new session ${session.id}`);
+    }
+
+    this.currentSession = session;
+
+    // Load semantic patterns
+    await this.semanticMemory.load();
+
+    // Preload idempotency cache if resuming
+    if (isResumed && this.config.enableIdempotency) {
+      const cached = await this.idempotencyManager.preloadSessionCache(session.id);
+      console.log(`[ORCHESTRATOR] Preloaded ${cached} cached executions`);
+    }
+
+    return {
+      state: {
+        session,
+        graph: this.currentGraph!,
+        memory: this.memoryManager!,
+        isResumed,
+        lastCheckpoint,
+        currentStep: session.step_count
+      },
+      intent
+    };
+  }
+
+  /**
+   * Build execution graph from plan
+   */
+  buildGraph(session: AgentSession): ExecutionGraph {
+    this.currentGraph = this.graphManager.buildFromPlan(session.id, session.plan.steps);
+    return this.currentGraph;
+  }
+
+  /**
+   * Get next nodes ready for execution
+   */
+  getReadyNodes(): ExecutionNode[] {
+    if (!this.currentGraph) {
+      throw new Error('Graph not initialized');
+    }
+    
+    const ready = this.graphManager.getReadyNodes(this.currentGraph);
+    // Limit parallel execution
+    return ready.slice(0, this.config.maxParallelNodes);
+  }
+
+  /**
+   * Execute a single node with idempotency and recording
+   */
+  async executeNode(
+    node: ExecutionNode,
+    executor: (tool: string, args: Record<string, unknown>) => Promise<unknown>
+  ): Promise<StepExecutionResult> {
+    if (!this.currentGraph || !this.currentSession || !this.memoryManager) {
+      throw new Error('Session not initialized');
+    }
+
+    const startTime = Date.now();
+    let result: unknown;
+    let fromCache = false;
+    let success = true;
+    let error: string | undefined;
+
+    // Check idempotency
+    if (this.config.enableIdempotency) {
+      const check = await this.idempotencyManager.checkIdempotency(node.hash);
+      if (check.isCached) {
+        console.log(`[ORCHESTRATOR] Cache hit for node ${node.id} (${node.tool})`);
+        this.graphManager.skipNode(this.currentGraph, node.id, check.cachedResult);
+        fromCache = true;
+        
+        return {
+          nodeId: node.id,
+          tool: node.tool,
+          success: true,
+          result: check.cachedResult,
+          fromCache: true,
+          durationMs: Date.now() - startTime
+        };
+      }
+    }
+
+    // Mark as running
+    this.graphManager.startNode(this.currentGraph, node.id);
+
+    // Create pre-state snapshot for replay
+    const preState = this.config.enableReplay 
+      ? this.replayEngine.createStateSnapshot(
+          this.memoryManager.serialize(),
+          this.currentGraph,
+          this.currentSession.context
+        )
+      : { memoryHash: '', graphHash: '', contextHash: '', timestamp: new Date().toISOString() };
+
+    try {
+      // Execute the tool
+      result = await executor(node.tool, node.args);
+      success = true;
+
+      // Complete node
+      this.graphManager.completeNode(this.currentGraph, node.id, result);
+
+      // Cache result
+      if (this.config.enableIdempotency) {
+        await this.idempotencyManager.cacheResult(
+          node.hash,
+          node.id,
+          node.tool,
+          node.args,
+          result,
+          this.currentSession.id,
+          { durationMs: Date.now() - startTime, success: true }
+        );
+      }
+
+      // Record to memory
+      await this.memoryManager.recordAction(node.tool, node.args, result, {
+        stepId: node.id,
+        target: this.currentSession.target,
+        success: true
+      });
+
+      // Learn from success
+      if (this.config.enableSemanticLearning) {
+        await this.semanticMemory.recordSuccess({
+          toolSequence: [node.tool],
+          targetTech: this.detectTech(),
+          sessionId: this.currentSession.id
+        });
+      }
+
+    } catch (err) {
+      error = String(err);
+      success = false;
+
+      // Fail node
+      this.graphManager.failNode(this.currentGraph, node.id, error);
+
+      // Learn from failure
+      if (this.config.enableSemanticLearning) {
+        const { pattern, mitigation } = await this.semanticMemory.recordFailure(error, {
+          toolName: node.tool,
+          target: this.currentSession.target,
+          sessionId: this.currentSession.id
+        });
+        
+        console.log(`[ORCHESTRATOR] Failure pattern: ${pattern.type}, mitigation: ${mitigation?.name || 'none'}`);
+      }
+
+      // Record error to memory
+      await this.memoryManager.recordError(error, {
+        tool: node.tool,
+        args: node.args,
+        phase: this.currentSession.phase
+      }, { target: this.currentSession.target });
+    }
+
+    const durationMs = Date.now() - startTime;
+
+    // Create post-state snapshot
+    const postState = this.config.enableReplay
+      ? this.replayEngine.createStateSnapshot(
+          this.memoryManager.serialize(),
+          this.currentGraph,
+          this.currentSession.context
+        )
+      : { memoryHash: '', graphHash: '', contextHash: '', timestamp: new Date().toISOString() };
+
+    // Record action for replay
+    if (this.config.enableReplay) {
+      await this.replayEngine.recordAction(this.currentSession.id, {
+        tool: node.tool,
+        args: node.args,
+        result,
+        success,
+        error,
+        durationMs,
+        nodeId: node.id,
+        graphVersion: this.currentGraph.version,
+        preState,
+        postState
+      });
+    }
+
+    return {
+      nodeId: node.id,
+      tool: node.tool,
+      success,
+      result,
+      fromCache,
+      durationMs,
+      error
+    };
+  }
+
+  /**
+   * Check if checkpoint should be created
+   */
+  async maybeCreateCheckpoint(
+    stepCount: number,
+    isRiskyOperation: boolean = false,
+    hasError: boolean = false
+  ): Promise<CheckpointResult | null> {
+    if (!this.currentSession || !this.currentGraph || !this.memoryManager) {
+      return null;
+    }
+
+    const { should, reason } = this.checkpointManager.shouldCreateCheckpoint(
+      stepCount,
+      isRiskyOperation,
+      hasError
+    );
+
+    if (should) {
+      const result = await this.checkpointManager.createCheckpoint(
+        this.currentSession,
+        this.currentGraph,
+        this.memoryManager,
+        reason
+      );
+      console.log(`[ORCHESTRATOR] Created checkpoint (reason: ${reason})`);
+      return result;
+    }
+
+    return null;
+  }
+
+  /**
+   * Check if an operation is risky
+   */
+  isRiskyOperation(toolName: string): boolean {
+    return this.checkpointManager.isRiskyOperation(toolName);
+  }
+
+  /**
+   * Get graph execution statistics
+   */
+  getGraphStats(): ReturnType<ExecutionGraphManager['getStats']> | null {
+    if (!this.currentGraph) return null;
+    return this.graphManager.getStats(this.currentGraph);
+  }
+
+  /**
+   * Check if graph is complete
+   */
+  isGraphComplete(): boolean {
+    if (!this.currentGraph) return false;
+    return this.graphManager.isComplete(this.currentGraph);
+  }
+
+  /**
+   * Get memory statistics
+   */
+  getMemoryStats(): ReturnType<UnifiedMemoryManager['getStats']> | null {
+    return this.memoryManager?.getStats() || null;
+  }
+
+  /**
+   * Get idempotency cache statistics
+   */
+  getCacheStats(): ReturnType<IdempotencyManager['getStats']> {
+    return this.idempotencyManager.getStats();
+  }
+
+  /**
+   * Get failure mitigation suggestion
+   */
+  getMitigation(failureType: FailureType): MitigationStrategy | null {
+    const patterns = Array.from(
+      (this.semanticMemory as unknown as { failurePatterns: Map<string, SemanticFailurePattern> }).failurePatterns?.values() || []
+    );
+    const matching = patterns.find(p => p.type === failureType);
+    return matching?.mitigation || null;
+  }
+
+  /**
+   * Resolve user intent
+   */
+  resolveIntent(message: string): ResolvedIntent {
+    return this.intentResolver.resolve(message);
+  }
+
+  /**
+   * Check if message is continuation intent
+   */
+  isContinueIntent(message: string): boolean {
+    return this.intentResolver.isContinueIntent(message);
+  }
+
+  /**
+   * Persist current graph state
+   */
+  async persistGraph(): Promise<void> {
+    if (this.currentGraph) {
+      await this.graphManager.persistGraph(this.currentGraph);
+    }
+  }
+
+  /**
+   * Get current session
+   */
+  getSession(): AgentSession | null {
+    return this.currentSession;
+  }
+
+  /**
+   * Get current graph
+   */
+  getGraph(): ExecutionGraph | null {
+    return this.currentGraph;
+  }
+
+  /**
+   * Get memory manager
+   */
+  getMemoryManager(): UnifiedMemoryManager | null {
+    return this.memoryManager;
+  }
+
+  /**
+   * Get semantic memory manager
+   */
+  getSemanticMemory(): SemanticMemoryManager {
+    return this.semanticMemory;
+  }
+
+  /**
+   * Detect target technology (simplified)
+   */
+  private detectTech(): string | undefined {
+    if (!this.currentSession) return undefined;
+    const techs = this.currentSession.context.technologies;
+    return techs.length > 0 ? techs[0] : undefined;
+  }
+
+  /**
+   * Extract target from message
+   */
+  private extractTarget(message: string): string | undefined {
+    // URL pattern
+    const urlMatch = message.match(/https?:\/\/[^\s]+/i);
+    if (urlMatch) return urlMatch[0];
+
+    // Domain pattern
+    const domainMatch = message.match(/(?:www\.)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}/i);
+    if (domainMatch) return domainMatch[0];
+
+    // IP pattern
+    const ipMatch = message.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+    if (ipMatch) return ipMatch[0];
+
+    return undefined;
+  }
+
+  /**
+   * Reset orchestrator state
+   */
+  reset(): void {
+    this.currentSession = null;
+    this.currentGraph = null;
+    this.memoryManager = null;
+    this.idempotencyManager.clearMemoryCache();
+  }
+}
+
+// ============================================================================
+// RE-EXPORTS FOR AUTONOMOUS LOOP ENGINE
+// ============================================================================
+
+// Re-export execution graph types
+export type { 
+  ExecutionGraph, 
+  ExecutionNode, 
+  NodeStatus 
+} from "./execution-graph.ts";
+export { ExecutionGraphManager } from "./execution-graph.ts";
+
+// Re-export idempotency types
+export type { 
+  CachedExecution, 
+  IdempotencyCheckResult 
+} from "./idempotency-manager.ts";
+export { IdempotencyManager } from "./idempotency-manager.ts";
+
+// Re-export replay engine types
+export type { 
+  ExecutedAction, 
+  StateSnapshot, 
+  Checkpoint, 
+  RestoredState 
+} from "./replay-engine.ts";
+export { ReplayEngine } from "./replay-engine.ts";
+
+// Re-export memory index types
+export type { 
+  MemoryEntry as UnifiedMemoryEntry, 
+  MemoryType, 
+  MemoryLayer,
+  MemoryIndex 
+} from "./memory-index.ts";
+export { UnifiedMemoryManager } from "./memory-index.ts";
+
+// Re-export checkpoint manager types
+export type { 
+  CheckpointResult, 
+  CheckpointReason 
+} from "./checkpoint-manager.ts";
+export { CheckpointManager } from "./checkpoint-manager.ts";
+
+// Re-export intent resolver types
+export type { 
+  ResolvedIntent, 
+  IntentType 
+} from "./intent-resolver.ts";
+export { IntentResolver } from "./intent-resolver.ts";
+
+// Re-export semantic memory types
+export type { 
+  FailureType, 
+  MitigationStrategy, 
+  SuccessPattern, 
+  LearnedStrategy 
+} from "./semantic-memory.ts";
+export { SemanticMemoryManager } from "./semantic-memory.ts";
