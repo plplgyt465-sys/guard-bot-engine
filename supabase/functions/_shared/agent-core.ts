@@ -21,6 +21,17 @@ import {
   Vulnerability
 } from "./exploit-engine.ts";
 
+import {
+  ExploitBrain,
+  BrainContext,
+  BrainDecision,
+  StrategyConfig,
+  ExploitStrategy,
+  WAFSignature,
+  ExploitChain,
+  FailurePattern
+} from "./exploit-brain.ts";
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -105,6 +116,18 @@ export interface Decision {
   feedback_result?: FeedbackResult;
   requires_approval?: boolean;
   alternative_tools?: string[];
+  // Advanced Exploit Brain additions
+  chain_node_id?: string;
+  payload_variant?: {
+    id: number;
+    payload: string;
+    encoding: string;
+    bypass_technique?: string;
+  };
+  evasion_techniques?: string[];
+  strategy_adjustment?: Partial<StrategyConfig>;
+  learning_insight?: string;
+  confidence_score?: number;
 }
 
 export interface MemoryEntry {
@@ -1156,6 +1179,228 @@ export function calculateSecurityScore(context: AgentContext): number {
   return Math.max(0, Math.min(100, score));
 }
 
+// ============================================================================
+// ENHANCED DECISION ENGINE WITH EXPLOIT BRAIN
+// ============================================================================
+
+export interface EnhancedDecisionContext extends DecisionContext {
+  strategyConfig?: Partial<StrategyConfig>;
+  wafDetected?: WAFSignature;
+  exploitChain?: ExploitChain;
+  failurePatterns?: FailurePattern[];
+}
+
+/**
+ * Enhanced Decision Engine that integrates the Exploit Brain
+ * for intelligent, adaptive decision making.
+ * 
+ * This is the recommended decision engine for production use.
+ */
+export class EnhancedDecisionEngine {
+  private supabase: SupabaseClient;
+  private loopProtection: LoopProtection;
+  private basicEngine: DecisionEngine;
+  private exploitBrain: ExploitBrain;
+  private useAdvancedBrain: boolean = true;
+
+  constructor(
+    supabase: SupabaseClient, 
+    loopProtection: LoopProtection,
+    initialStrategy?: Partial<StrategyConfig>
+  ) {
+    this.supabase = supabase;
+    this.loopProtection = loopProtection;
+    this.basicEngine = new DecisionEngine(supabase, loopProtection);
+    this.exploitBrain = new ExploitBrain(supabase, initialStrategy);
+  }
+
+  /**
+   * Enable or disable advanced brain (for fallback to basic rules)
+   */
+  setAdvancedMode(enabled: boolean): void {
+    this.useAdvancedBrain = enabled;
+  }
+
+  /**
+   * Get the exploit brain instance
+   */
+  getBrain(): ExploitBrain {
+    return this.exploitBrain;
+  }
+
+  /**
+   * Get the basic decision engine
+   */
+  getBasicEngine(): DecisionEngine {
+    return this.basicEngine;
+  }
+
+  /**
+   * Make a decision using the enhanced brain
+   */
+  async decide(ctx: EnhancedDecisionContext): Promise<Decision> {
+    // If advanced brain is disabled, fall back to basic engine
+    if (!this.useAdvancedBrain) {
+      return this.basicEngine.decide(ctx);
+    }
+
+    // Build brain context from decision context
+    const brainContext: BrainContext = {
+      session: ctx.session,
+      phase: ctx.phase,
+      chain: ctx.exploitChain || this.exploitBrain.getActiveChain() || undefined,
+      wafDetected: ctx.wafDetected || this.exploitBrain.getDetectedWAF() || undefined,
+      failurePatterns: ctx.failurePatterns || this.exploitBrain.getFailurePatterns(),
+      strategyConfig: ctx.strategyConfig 
+        ? { ...this.exploitBrain.getStrategyConfig(), ...ctx.strategyConfig } as StrategyConfig
+        : this.exploitBrain.getStrategyConfig(),
+      availableTools: ctx.availableTools,
+      lastToolResult: ctx.lastToolResult,
+      currentVulnerability: ctx.currentVulnerability
+    };
+
+    try {
+      // Get decision from exploit brain
+      const brainDecision = await this.exploitBrain.decide(brainContext);
+      
+      // Convert brain decision to standard decision format
+      const decision = this.convertBrainDecision(brainDecision);
+      
+      // Log the decision
+      await this.logDecision(ctx.session.id, ctx.phase, decision);
+      
+      return decision;
+    } catch (error) {
+      console.error('Exploit brain error, falling back to basic engine:', error);
+      return this.basicEngine.decide(ctx);
+    }
+  }
+
+  /**
+   * Initialize an exploit chain for discovered vulnerabilities
+   */
+  initializeExploitChain(
+    sessionId: string,
+    target: string,
+    vulnerabilities: Vulnerability[],
+    strategy?: ExploitStrategy
+  ): ExploitChain {
+    return this.exploitBrain.initializeChain(sessionId, target, vulnerabilities, strategy);
+  }
+
+  /**
+   * Get current strategy configuration
+   */
+  getStrategyConfig(): StrategyConfig {
+    return this.exploitBrain.getStrategyConfig();
+  }
+
+  /**
+   * Update strategy configuration
+   */
+  setStrategy(config: Partial<StrategyConfig>): void {
+    this.exploitBrain.setStrategy(config);
+  }
+
+  /**
+   * Get detected WAF information
+   */
+  getDetectedWAF(): WAFSignature | null {
+    return this.exploitBrain.getDetectedWAF();
+  }
+
+  /**
+   * Get active exploit chain
+   */
+  getActiveChain(): ExploitChain | null {
+    return this.exploitBrain.getActiveChain();
+  }
+
+  /**
+   * Get failure analysis patterns
+   */
+  getFailurePatterns(): FailurePattern[] {
+    return this.exploitBrain.getFailurePatterns();
+  }
+
+  /**
+   * Process tool result for learning
+   */
+  async processToolResult(
+    sessionId: string,
+    vuln: Vulnerability,
+    toolId: string,
+    result: { success: boolean; output: unknown; executionTimeMs: number; error?: string }
+  ): Promise<FeedbackResult> {
+    // Use basic engine's process
+    return this.basicEngine.processToolResult(sessionId, vuln, toolId, result);
+  }
+
+  /**
+   * Reset brain state for a new session
+   */
+  reset(): void {
+    this.exploitBrain.reset();
+  }
+
+  /**
+   * Convert brain decision to standard decision format
+   */
+  private convertBrainDecision(brainDecision: BrainDecision): Decision {
+    const decision: Decision = {
+      type: brainDecision.type,
+      reason: brainDecision.reason,
+      tool_name: brainDecision.tool_name,
+      tool_args: brainDecision.tool_args,
+      new_plan: brainDecision.new_plan,
+      risk_assessment: brainDecision.risk_assessment,
+      requires_approval: brainDecision.requires_approval,
+      alternative_tools: brainDecision.alternative_tools,
+      // Advanced fields
+      chain_node_id: brainDecision.chainNodeId,
+      confidence_score: brainDecision.confidenceScore,
+      learning_insight: brainDecision.learningInsight,
+      evasion_techniques: brainDecision.evasionTechniques,
+      strategy_adjustment: brainDecision.strategyAdjustment
+    };
+
+    // Add payload variant if present
+    if (brainDecision.payloadVariant) {
+      decision.payload_variant = {
+        id: brainDecision.payloadVariant.id,
+        payload: brainDecision.payloadVariant.payload,
+        encoding: brainDecision.payloadVariant.encoding,
+        bypass_technique: brainDecision.payloadVariant.bypassTechnique
+      };
+    }
+
+    return decision;
+  }
+
+  /**
+   * Log decision to database
+   */
+  private async logDecision(sessionId: string, phase: AgentPhase, decision: Decision): Promise<void> {
+    await this.supabase.from('agent_decisions').insert({
+      session_id: sessionId,
+      phase,
+      decision_type: decision.type,
+      reason: decision.reason,
+      tool_name: decision.tool_name,
+      input: decision.tool_args,
+      output: null,
+      // Additional metadata
+      confidence_score: decision.confidence_score,
+      chain_node_id: decision.chain_node_id,
+      learning_insight: decision.learning_insight
+    });
+  }
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS (continued)
+// ============================================================================
+
 export function formatFindingsReport(session: AgentSession): string {
   const { context, tool_history } = session;
   
@@ -1200,3 +1445,30 @@ export function formatFindingsReport(session: AgentSession): string {
 
   return report;
 }
+
+// ============================================================================
+// RE-EXPORTS FOR CONVENIENT IMPORTS
+// ============================================================================
+
+// Re-export exploit brain types for easy access
+export type {
+  BrainContext,
+  BrainDecision,
+  StrategyConfig,
+  ExploitStrategy,
+  WAFSignature,
+  ExploitChain,
+  ExploitChainNode,
+  FailurePattern,
+  PayloadVariant
+} from "./exploit-brain.ts";
+
+// Re-export exploit brain components
+export {
+  ExploitBrain,
+  WAFDetector,
+  PayloadMutator,
+  FailureAnalyzer,
+  ExploitChainBuilder,
+  StrategyAdaptor
+} from "./exploit-brain.ts";
