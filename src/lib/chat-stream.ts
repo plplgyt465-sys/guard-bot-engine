@@ -39,6 +39,10 @@ export interface AgentSession {
       severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
       description: string;
       evidence?: string;
+      confirmed?: boolean;
+      exploited?: boolean;
+      cve?: string;
+      cvss?: number;
     }>;
     open_ports: number[];
     services: Array<{ port: number; service: string; version?: string }>;

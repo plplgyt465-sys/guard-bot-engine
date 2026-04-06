@@ -296,6 +296,78 @@ interface ExploitConfig {
   isProduction: boolean;
 }
 
+// Helper function to analyze tool results and extract findings
+function analyzeToolResult(context: AgentContext, toolName: string, result: unknown): { updatedContext: AgentContext; findings: string[] } {
+  const findings: string[] = [];
+  const updatedContext = { ...context };
+
+  if (!result || typeof result !== 'object') {
+    return { updatedContext, findings };
+  }
+
+  const resultObj = result as Record<string, unknown>;
+
+  // Extract vulnerabilities from results based on tool type
+  if (toolName.includes('scan') || toolName.includes('test')) {
+    if (Array.isArray(resultObj.vulnerabilities)) {
+      resultObj.vulnerabilities.forEach((vuln: unknown) => {
+        if (typeof vuln === 'object' && vuln) {
+          const v = vuln as Record<string, unknown>;
+          updatedContext.vulnerabilities.push({
+            id: `${toolName}-${Date.now()}`,
+            type: (v.type as string) || toolName.replace('_scan', '').replace('_test', ''),
+            severity: (v.severity as any) || 'medium',
+            description: (v.description as string) || JSON.stringify(v),
+            evidence: (v.evidence as string),
+            confirmed: false,
+            exploited: false,
+            cve: (v.cve as string),
+            cvss: typeof v.cvss === 'number' ? v.cvss : undefined,
+          });
+          findings.push(`Found ${(v.type as string) || 'vulnerability'}: ${(v.description as string) || 'Unknown'}`);
+        }
+      });
+    } else if (resultObj.found || resultObj.vulnerable) {
+      findings.push(`${toolName} detected a potential vulnerability`);
+    }
+  }
+
+  // Extract open ports
+  if (toolName === 'port_scan' && Array.isArray(resultObj.ports)) {
+    const ports = (resultObj.ports as Array<any>)
+      .filter(p => p && typeof p === 'object' && typeof p.port === 'number')
+      .map(p => p.port);
+    updatedContext.open_ports = [...new Set([...updatedContext.open_ports, ...ports])];
+    findings.push(`Found ${ports.length} open ports`);
+  }
+
+  // Extract services
+  if ((toolName === 'service_detect' || toolName === 'tech_detect') && Array.isArray(resultObj.services)) {
+    const services = (resultObj.services as Array<any>)
+      .filter(s => s && typeof s === 'object' && typeof s.port === 'number')
+      .map(s => ({ port: s.port, service: (s.name || s.service || 'unknown') as string, version: s.version as string | undefined }));
+    updatedContext.services = [...updatedContext.services, ...services];
+    findings.push(`Detected ${services.length} services`);
+  }
+
+  // Extract technologies
+  if (toolName.includes('tech') && Array.isArray(resultObj.technologies)) {
+    const techs = (resultObj.technologies as string[]).filter(t => typeof t === 'string');
+    updatedContext.technologies = [...new Set([...updatedContext.technologies, ...techs])];
+    findings.push(`Detected ${techs.length} technologies`);
+  }
+
+  // Extract any generic findings
+  if (resultObj.findings && Array.isArray(resultObj.findings)) {
+    const resultFindings = (resultObj.findings as string[]).filter(f => typeof f === 'string');
+    findings.push(...resultFindings);
+  }
+
+  return { updatedContext, findings };
+}
+
+// Configuration for exploit intelligence
+
 // Main agent loop - processes one iteration and returns
 async function runAgentStep(
   session: AgentSession,
@@ -336,7 +408,7 @@ async function runAgentStep(
   
   // Determine current vulnerability being targeted (if any)
   const unprocessedVulns = session.context.vulnerabilities.filter(v => !v.exploited && v.confirmed);
-  const currentVulnerability = unprocessedVulns.length > 0 ? unprocessedVulns[0] as Vulnerability : undefined;
+  const currentVulnerability = unprocessedVulns.length > 0 ? (unprocessedVulns[0] as Vulnerability) : undefined;
   
   // Determine exploit phase based on session state
   let exploitPhase: 'scan' | 'exploit' | 'verify' | 'post_exploit' | undefined;

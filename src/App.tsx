@@ -10,6 +10,7 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+// Autonomous Agent System Ready
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
