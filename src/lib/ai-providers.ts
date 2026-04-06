@@ -135,13 +135,18 @@ export interface AIProviderSettings {
 
 export async function getAIProviderSettings(): Promise<AIProviderSettings | null> {
   try {
-    const { data, error } = await supabase
+    const result = await supabase
       .from("ai_provider_settings")
       .select("*")
       .limit(1)
       .maybeSingle();
 
-    if (error || !data) return null;
+    const { data, error } = result || { data: null, error: null };
+
+    if (error || !data) {
+      console.warn('[v0] AI provider settings not found or error:', error?.message);
+      return null;
+    }
 
     const raw = data.api_keys as unknown;
     let providerKeys: ProviderKeysMap = {};
