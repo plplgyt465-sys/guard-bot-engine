@@ -850,6 +850,39 @@ serve(async (req) => {
     // Handle different actions
     switch (action) {
       case 'start': {
+        // Support autonomous mode with natural language message
+        const userMessage = body.message || intent || '';
+        const useAutonomous = body.useAutonomousLoop ?? true; // Default to autonomous mode
+
+        // Check if this is a continuation intent (Arabic/English)
+        if (useAutonomous && userMessage) {
+          const orchestrator = new AutonomousLoopOrchestrator(supabase, {
+            checkpointInterval: 2,
+            enableIdempotency: body.enableIdempotency ?? true,
+            enableReplay: body.enableCheckpoints ?? true,
+            enableSemanticLearning: true,
+          });
+
+          const resolvedIntent = orchestrator.resolveIntent(userMessage);
+          
+          // If continuation intent, redirect to continue action
+          if (resolvedIntent.shouldResume && chatSessionId) {
+            // Find existing session to continue
+            const existingSession = await sessionManager.getActiveSessionForChat(chatSessionId);
+            if (existingSession) {
+              return new Response(JSON.stringify({
+                success: true,
+                action: 'redirect_continue',
+                agentSessionId: existingSession.id,
+                intent: resolvedIntent,
+                message: `Detected continuation intent: "${resolvedIntent.originalText}" -> resuming session`,
+              }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+          }
+        }
+
         if (!chatSessionId || !target) {
           return new Response(JSON.stringify({ success: false, error: 'chatSessionId and target are required' }), {
             status: 400,
@@ -877,13 +910,39 @@ serve(async (req) => {
           success: true,
           session,
           message: `Agent session created with ${plan.steps.length} planned steps`,
+          autonomousMode: useAutonomous,
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
       case 'continue': {
-        if (!agentSessionId) {
+        const useAutonomous = body.useAutonomousLoop ?? true;
+        const userMessage = body.message || '';
+
+        // For autonomous mode, we can use message-based session resolution
+        if (useAutonomous && userMessage && chatSessionId && !agentSessionId) {
+          const orchestrator = new AutonomousLoopOrchestrator(supabase, {
+            checkpointInterval: 2,
+            enableIdempotency: body.enableIdempotency ?? true,
+            enableReplay: body.enableCheckpoints ?? true,
+            enableSemanticLearning: true,
+          });
+
+          const resolvedIntent = orchestrator.resolveIntent(userMessage);
+          
+          // Find session based on intent
+          if (resolvedIntent.shouldResume) {
+            const existingSession = await sessionManager.getActiveSessionForChat(chatSessionId);
+            if (existingSession) {
+              // Use the found session
+              body.agentSessionId = existingSession.id;
+            }
+          }
+        }
+
+        const sessionId = agentSessionId || body.agentSessionId;
+        if (!sessionId) {
           return new Response(JSON.stringify({ success: false, error: 'agentSessionId is required' }), {
             status: 400,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -891,7 +950,7 @@ serve(async (req) => {
         }
 
         // Get existing session
-        const session = await sessionManager.getSession(agentSessionId);
+        const session = await sessionManager.getSession(sessionId);
         if (!session) {
           return new Response(JSON.stringify({ success: false, error: 'Session not found' }), {
             status: 404,
@@ -927,58 +986,135 @@ serve(async (req) => {
           isProduction: body.isProduction || false,
         };
 
-        // Run agent loop — continues until goal is reached (no step cap)
-        (async () => {
-          let currentSession = session;
-          
-          try {
-            while (true) {
-              const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
-                currentSession,
+        // Choose execution mode: DAG-based or legacy sequential
+        if (useAutonomous) {
+          // === DAG-BASED AUTONOMOUS LOOP ===
+          (async () => {
+            try {
+              const orchestrator = new AutonomousLoopOrchestrator(supabase, {
+                checkpointInterval: 2,
+                enableIdempotency: body.enableIdempotency ?? true,
+                enableReplay: body.enableCheckpoints ?? true,
+                enableSemanticLearning: true,
+              });
+
+              // Initialize or resume session
+              const { state, intent } = await orchestrator.initializeSession(
+                chatSessionId || session.chat_session_id,
+                userMessage || 'continue',
+                sessionManager
+              );
+
+              if (state.isResumed) {
+                await send(`[RESUMED] Session restored from checkpoint\n`);
+                await send(`[MEMORY] ${orchestrator.getMemoryStats()?.totalCount || 0} entries loaded\n`);
+              }
+
+              // Run DAG-based execution
+              const result = await runDAGLoop(
+                orchestrator,
                 supabase,
-                encoder,
                 (text) => send(text),
                 exploitConfig
               );
-              
-              currentSession = updatedSession;
-              
-              if (!shouldContinue) {
-                break;
+
+              // Send final status
+              await send(`\n--- Session Status (Autonomous Mode) ---\n`);
+              await send(`Phase: ${result.session.phase}\n`);
+              await send(`Nodes executed: ${result.nodesExecuted}\n`);
+              await send(`Cache hits: ${result.nodesFromCache}\n`);
+              await send(`Checkpoints: ${result.checkpointsCreated}\n`);
+              await send(`Findings: ${result.session.findings.length}\n`);
+              await send(`Vulnerabilities: ${result.session.context.vulnerabilities.length}\n`);
+
+              if (result.session.phase === 'DONE') {
+                await send(`\nSecurity Score: ${result.session.security_score}/100\n`);
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                  type: 'complete', 
+                  session: result.session,
+                  report: formatFindingsReport(result.session),
+                  stats: {
+                    nodesExecuted: result.nodesExecuted,
+                    nodesFromCache: result.nodesFromCache,
+                    checkpointsCreated: result.checkpointsCreated,
+                  },
+                })}\n\n`));
+              } else {
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                  type: 'paused', 
+                  session: result.session,
+                  message: `Agent paused. Send "واصل" or "continue" to resume from checkpoint.`,
+                  stats: {
+                    nodesExecuted: result.nodesExecuted,
+                    nodesFromCache: result.nodesFromCache,
+                    checkpointsCreated: result.checkpointsCreated,
+                  },
+                })}\n\n`));
               }
+            } catch (e) {
+              console.error('Autonomous agent error:', e);
+              await send(`Error: ${e instanceof Error ? e.message : 'Unknown error'}\n`);
+              await sessionManager.errorSession(session.id, e instanceof Error ? e.message : 'Unknown error');
+              await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e instanceof Error ? e.message : 'Unknown error' })}\n\n`));
+            } finally {
+              await writer.write(encoder.encode('data: [DONE]\n\n'));
+              await writer.close();
             }
+          })();
+        } else {
+          // === LEGACY SEQUENTIAL LOOP ===
+          (async () => {
+            let currentSession = session;
             
-            // Send final status
-            await send(`\n--- Session Status ---\n`);
-            await send(`Phase: ${currentSession.phase}\n`);
-            await send(`Steps completed: ${currentSession.step_count}\n`);
-            await send(`Findings: ${currentSession.findings.length}\n`);
-            await send(`Vulnerabilities: ${currentSession.context.vulnerabilities.length}\n`);
-            
-            if (currentSession.phase === 'DONE') {
-              await send(`\nSecurity Score: ${currentSession.security_score}/100\n`);
-              await writer.write(encoder.encode(`data: ${JSON.stringify({ 
-                type: 'complete', 
-                session: currentSession,
-                report: formatFindingsReport(currentSession),
-              })}\n\n`));
-            } else {
-              await writer.write(encoder.encode(`data: ${JSON.stringify({ 
-                type: 'paused', 
-                session: currentSession,
-                message: `Agent paused at phase ${currentSession.phase}. Send 'continue' to resume.`,
-              })}\n\n`));
+            try {
+              while (true) {
+                const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
+                  currentSession,
+                  supabase,
+                  encoder,
+                  (text) => send(text),
+                  exploitConfig
+                );
+                
+                currentSession = updatedSession;
+                
+                if (!shouldContinue) {
+                  break;
+                }
+              }
+              
+              // Send final status
+              await send(`\n--- Session Status ---\n`);
+              await send(`Phase: ${currentSession.phase}\n`);
+              await send(`Steps completed: ${currentSession.step_count}\n`);
+              await send(`Findings: ${currentSession.findings.length}\n`);
+              await send(`Vulnerabilities: ${currentSession.context.vulnerabilities.length}\n`);
+              
+              if (currentSession.phase === 'DONE') {
+                await send(`\nSecurity Score: ${currentSession.security_score}/100\n`);
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                  type: 'complete', 
+                  session: currentSession,
+                  report: formatFindingsReport(currentSession),
+                })}\n\n`));
+              } else {
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ 
+                  type: 'paused', 
+                  session: currentSession,
+                  message: `Agent paused at phase ${currentSession.phase}. Send 'continue' to resume.`,
+                })}\n\n`));
+              }
+            } catch (e) {
+              console.error('Agent error:', e);
+              await send(`Error: ${e instanceof Error ? e.message : 'Unknown error'}\n`);
+              await sessionManager.errorSession(currentSession.id, e instanceof Error ? e.message : 'Unknown error');
+              await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e instanceof Error ? e.message : 'Unknown error' })}\n\n`));
+            } finally {
+              await writer.write(encoder.encode('data: [DONE]\n\n'));
+              await writer.close();
             }
-          } catch (e) {
-            console.error('Agent error:', e);
-            await send(`Error: ${e instanceof Error ? e.message : 'Unknown error'}\n`);
-            await sessionManager.errorSession(currentSession.id, e instanceof Error ? e.message : 'Unknown error');
-            await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e instanceof Error ? e.message : 'Unknown error' })}\n\n`));
-          } finally {
-            await writer.write(encoder.encode('data: [DONE]\n\n'));
-            await writer.close();
-          }
-        })();
+          })();
+        }
 
         return new Response(stream.readable, {
           headers: { ...corsHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
