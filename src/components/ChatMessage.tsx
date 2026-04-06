@@ -15,15 +15,23 @@ function parseSecurityScore(content: string): number | null {
   return match ? parseInt(match[1]) : null;
 }
 
-function parseProgress(content: string): { round: number; max: number; timeLeft: number; tools: string[] } | null {
-  const progressMatch = content.match(/<!--PROGRESS:(\d+)\/(\d+):(\d+)-->/);
-  if (!progressMatch) return null;
-  const toolMatches = content.match(/⚡ \*\*الجولة \d+ - تنفيذ:\*\* (.+)/g) || [];
+function parseProgress(content: string): { step: number; tools: string[]; phase?: string } | null {
+  // Match step number: <!--STEP:123--> or [PHASE] Step 123
+  const stepMatch = content.match(/<!--STEP:(\d+)-->/) || content.match(/\[(\w+)\]\s*Step\s*(\d+)/);
+  if (!stepMatch) return null;
+  
+  const step = parseInt(stepMatch[2] || stepMatch[1]);
+  const phaseMatch = content.match(/\[(\w+)\]\s*Step/);
+  const phase = phaseMatch ? phaseMatch[1] : undefined;
+  
+  // Extract tool names from execution lines
+  const toolMatches = content.match(/⚡\s*(?:\*\*)?(?:الخطوة|Step)\s*\d+\s*[-–]\s*(?:تنفيذ|Execute)[:\s]*(?:\*\*)?\s*(.+)/gi) || [];
   const tools = toolMatches.flatMap(m => {
-    const inner = m.match(/تنفيذ:\*\* (.+)/);
-    return inner ? inner[1].split(", ") : [];
+    const inner = m.match(/(?:تنفيذ|Execute)[:\s]*(?:\*\*)?\s*(.+)/i);
+    return inner ? inner[1].split(/[,،]/).map(t => t.trim()).filter(Boolean) : [];
   });
-  return { round: parseInt(progressMatch[1]), max: parseInt(progressMatch[2]), timeLeft: parseInt(progressMatch[3]), tools };
+  
+  return { step, tools, phase };
 }
 
 export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
@@ -35,7 +43,7 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
   const displayContent = useMemo(() => 
     message.content
       .replace(/<!--SECURITY_SCORE:\d+-->/g, "")
-      .replace(/<!--PROGRESS:\d+\/\d+:\d+-->/g, ""),
+      .replace(/<!--STEP:\d+-->/g, ""),
     [message.content]
   );
 
@@ -68,10 +76,9 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
           <div className="prose prose-sm prose-invert max-w-none text-card-foreground">
             {progress && isStreaming && (
               <ScanProgressBar
-                currentRound={progress.round}
-                maxRounds={progress.max}
-                timeLeft={progress.timeLeft}
+                currentStep={progress.step}
                 toolsExecuted={progress.tools}
+                currentPhase={progress.phase}
               />
             )}
             <ReactMarkdown

@@ -59,8 +59,6 @@ export interface AgentSession {
     error?: string;
   }>;
   step_count: number;
-  max_steps: number;
-  no_progress_count: number;
   security_score: number | null;
   started_at: string;
   updated_at: string;
@@ -145,11 +143,10 @@ export async function startAutonomousScan({
           "Content-Type": "application/json",
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
         },
-        body: JSON.stringify({
-          action: 'continue',
-          agentSessionId,
-          maxSteps: 10,
-        }),
+      body: JSON.stringify({
+        action: 'continue',
+        agentSessionId,
+      }),
       });
 
       if (!continueResponse.ok) {
@@ -208,9 +205,6 @@ export async function startAutonomousScan({
 
         if (sessionComplete) break;
       }
-
-      // Small delay before next iteration
-      await new Promise(r => setTimeout(r, 1000));
     }
 
     return { sessionId: agentSessionId, abort };

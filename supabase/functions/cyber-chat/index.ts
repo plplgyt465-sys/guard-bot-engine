@@ -729,81 +729,13 @@ async function executeToolCall(name: string, args: Record<string, string>): Prom
   }
 }
 
-const MAX_ROUNDS = 5;
-const TIME_BUDGET_MS = 120_000;
+// No round limit - runs until goal is achieved
+const TIME_BUDGET_MS = 300_000; // 5 minutes budget
 const TOOL_TIMEOUT_MS = 25_000;
-const MAX_TOKENS_PER_MINUTE = 12000;
-const MIN_DELAY_MS = 800;   // Minimum delay between AI calls
-const MAX_DELAY_MS = 15_000; // Maximum backoff delay
-const INITIAL_DELAY_MS = 1000; // Starting delay
 
 // Simple token estimator (~4 chars per token)
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
-}
-
-// Rate limiter: track token usage per minute
-const tokenUsage: { tokens: number; resetAt: number }[] = [];
-
-// Smart request queue with adaptive delay
-const requestQueue = {
-  lastRequestTime: 0,
-  consecutiveErrors: 0,
-  currentDelay: INITIAL_DELAY_MS,
-
-  // Adaptive delay: increases on errors, decreases on success
-  getDelay(): number {
-    if (this.consecutiveErrors === 0) return MIN_DELAY_MS;
-    // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
-    return Math.min(MAX_DELAY_MS, INITIAL_DELAY_MS * Math.pow(2, this.consecutiveErrors - 1));
-  },
-
-  async waitTurn(): Promise<void> {
-    const now = Date.now();
-    const elapsed = now - this.lastRequestTime;
-    const delay = this.getDelay();
-    if (elapsed < delay) {
-      await new Promise(r => setTimeout(r, delay - elapsed));
-    }
-    this.lastRequestTime = Date.now();
-  },
-
-  onSuccess() {
-    this.consecutiveErrors = Math.max(0, this.consecutiveErrors - 1);
-  },
-
-  onRateLimit() {
-    this.consecutiveErrors = Math.min(5, this.consecutiveErrors + 1);
-  },
-
-  reset() {
-    this.consecutiveErrors = 0;
-  }
-};
-
-function getTokensUsedThisMinute(): number {
-  const now = Date.now();
-  while (tokenUsage.length > 0 && tokenUsage[0].resetAt <= now) {
-    tokenUsage.shift();
-  }
-  return tokenUsage.reduce((sum, e) => sum + e.tokens, 0);
-}
-
-function recordTokenUsage(tokens: number) {
-  tokenUsage.push({ tokens, resetAt: Date.now() + 60_000 });
-}
-
-function getAvailableTokens(): number {
-  return Math.max(0, MAX_TOKENS_PER_MINUTE - getTokensUsedThisMinute());
-}
-
-async function waitForTokenBudget(needed: number): Promise<boolean> {
-  const available = getAvailableTokens();
-  if (available >= needed) return true;
-  // Wait with exponential backoff
-  const waitMs = Math.min(10_000, requestQueue.getDelay() + 2000);
-  await new Promise(r => setTimeout(r, waitMs));
-  return getAvailableTokens() >= Math.min(needed, 2000);
 }
 
 // Trim messages to fit within token budget
@@ -933,7 +865,6 @@ function getNextAvailableKey(totalKeys: number, startFrom: number): number {
 // Call AI with smart provider-level switching
 // When a provider hits rate limit (429), skip ALL keys from that provider instantly
 async function callAIWithFallback(messages: any[], tools: any[], stream: boolean, customProvider?: { providerId: string; modelId: string; apiKey: string; apiKeys?: string[]; allProviderKeys?: { providerId: string; keys: string[] }[] }, startFromKey = -1): Promise<{ response: Response; usedKeyIndex: number; errorDetails?: string }> {
-  await requestQueue.waitTurn();
 
   // Build grouped provider list: each provider with its keys
   const providerGroups: { providerId: string; modelId: string; keys: string[] }[] = [];
@@ -958,7 +889,6 @@ async function callAIWithFallback(messages: any[], tools: any[], stream: boolean
 
   if (providerGroups.length === 0) {
     const response = await callAI(messages, tools, stream);
-    if (response.ok) requestQueue.onSuccess();
     return { response, usedKeyIndex: 0 };
   }
 
@@ -986,7 +916,6 @@ async function callAIWithFallback(messages: any[], tools: any[], stream: boolean
       const response = await callAI(messages, tools, stream, providerWithKey);
       
       if (response.ok) {
-        requestQueue.onSuccess();
         globalKeyCounter = keyIdx + 1;
         console.log(`✅ Success with ${group.providerId} key #${keyIdx + 1}/${group.keys.length}`);
         return { response, usedKeyIndex: globalIdx + keyIdx };
@@ -1041,7 +970,6 @@ async function callAIWithFallback(messages: any[], tools: any[], stream: boolean
     errors.push("⬇️ جاري التبديل إلى Lovable AI كخط دفاع أخير");
     const response = await callAI(messages, tools, stream);
     if (response.ok) {
-      requestQueue.onSuccess();
       return { response, usedKeyIndex: -1, errorDetails: errors.join("\n") };
     }
   }
@@ -1151,40 +1079,30 @@ serve(async (req) => {
         const timeLeft = () => TIME_BUDGET_MS - (Date.now() - startTime);
 
         try {
-          let round = 0;
+          let step = 0;
           let conversationMessages = [...budgetedMessages];
-          // Each round uses a different key: round 1 → key 0, round 2 → key 1, etc.
+          // Unlimited loop - continues until AI stops calling tools or time runs out
 
-          while (round < MAX_ROUNDS) {
+          while (true) {
             if (closed || timeLeft() < 15_000) {
               if (!closed) send("\n\n⏱️ انتهى الوقت المتاح، جاري تقديم التقرير...\n");
               break;
             }
             
-            // Rate limiting: check token budget
-            const requestTokens = estimateTokens(JSON.stringify(conversationMessages));
-            if (!await waitForTokenBudget(requestTokens)) {
-              send("\n⏳ انتظار لتجنب تجاوز حد التوكنات...\n");
-              await new Promise(r => setTimeout(r, 3000));
-            }
-            
-            round++;
+            step++;
 
-            // Send progress info
-            send(`\n<!--PROGRESS:${round}/${MAX_ROUNDS}:${Math.round(timeLeft()/1000)}-->\n`);
-            
-            // Record token usage for this request
-            recordTokenUsage(estimateTokens(JSON.stringify(conversationMessages)) + 1024);
+            // Send step info (no max limit shown)
+            send(`\n<!--STEP:${step}-->\n`);
 
-            // Each round starts from a different key (round-robin), failed keys auto-skipped
-            const keyIndexForRound = (round - 1);
+            // Each step uses a different key (round-robin), failed keys auto-skipped
+            const keyIndexForStep = (step - 1);
             const { response: aiResponse, usedKeyIndex, errorDetails } = await withTimeout(
-              callAIWithFallback(conversationMessages, aiTools, false, effectiveProvider, keyIndexForRound),
+              callAIWithFallback(conversationMessages, aiTools, false, effectiveProvider, keyIndexForStep),
               Math.min(30_000, timeLeft()),
               "طلب AI"
             );
             
-            send(`\n🔑 **الجولة ${round}** — مفتاح #${usedKeyIndex + 1}\n`);
+            send(`\n🔑 **الخطوة ${step}** — مفتاح #${usedKeyIndex + 1}\n`);
 
             if (!aiResponse.ok) {
               const status = aiResponse.status;
@@ -1240,7 +1158,7 @@ serve(async (req) => {
                   if (toolType) {
                     delete parsed.type;
                     parsedCalls.push({
-                      id: `fallback_${round}_${parsedCalls.length}`,
+                      id: `fallback_${step}_${parsedCalls.length}`,
                       type: "function",
                       function: { name: toolType, arguments: JSON.stringify(parsed) },
                     });
@@ -1263,7 +1181,7 @@ serve(async (req) => {
             }
 
             const toolNames = toolCalls.map((tc: any) => tc.function.name).join(", ");
-            send(`\n⚡ **الجولة ${round} - تنفيذ:** ${toolNames}\n\n`);
+            send(`\n⚡ **الخطوة ${step} - تنفيذ:** ${toolNames}\n\n`);
 
             const toolResults = await Promise.all(
               toolCalls.map(async (tc: any) => {
@@ -1339,10 +1257,8 @@ serve(async (req) => {
           }
 
           // Final analysis
-          if (!closed && round > 0 && timeLeft() > 10_000) {
-            if (round >= MAX_ROUNDS) {
-              send("\n\n---\n📊 **التحليل النهائي:**\n");
-            }
+          if (!closed && step > 0 && timeLeft() > 10_000) {
+            send("\n\n---\n📊 **التحليل النهائي:**\n");
 
             try {
               const finalMessages = [...conversationMessages, { role: "user", content: "قدم الآن تقريراً أمنياً شاملاً ومرتباً بالأولوية بناءً على كل النتائج السابقة. احسب Security Score من 0-100 وأضف <!--SECURITY_SCORE:XX--> في النهاية. لا تستخدم أدوات. كن مختصراً." }];
