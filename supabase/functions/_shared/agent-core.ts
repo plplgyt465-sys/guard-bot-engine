@@ -96,7 +96,6 @@ export interface AgentSession {
   findings: unknown[];
   tool_history: ToolExecution[];
   step_count: number;
-  max_steps: number;
   no_progress_count: number;
   security_score: number | null;
   started_at: string;
@@ -231,15 +230,13 @@ export class PhaseController {
 // ============================================================================
 
 export interface LoopProtectionConfig {
-  maxSteps: number;
   maxDuplicateTools: number;
   maxNoProgressRounds: number;
 }
 
 const DEFAULT_LOOP_CONFIG: LoopProtectionConfig = {
-  maxSteps: 30,
   maxDuplicateTools: 3,
-  maxNoProgressRounds: 3
+  maxNoProgressRounds: 5
 };
 
 export class LoopProtection {
@@ -249,13 +246,6 @@ export class LoopProtection {
   constructor(session: AgentSession, config?: Partial<LoopProtectionConfig>) {
     this.session = session;
     this.config = { ...DEFAULT_LOOP_CONFIG, ...config };
-  }
-
-  /**
-   * Check if the agent has exceeded maximum steps
-   */
-  isMaxStepsReached(): boolean {
-    return this.session.step_count >= this.config.maxSteps;
   }
 
   /**
@@ -298,14 +288,12 @@ export class LoopProtection {
   }
 
   /**
-   * Get a stop reason if any protection is triggered
+   * Get a stop reason if any protection is triggered.
+   * Stops only when no progress is made for N consecutive rounds (duplicate tool loop).
    */
   getStopReason(): string | null {
-    if (this.isMaxStepsReached()) {
-      return `Maximum steps reached (${this.config.maxSteps}). Stopping to prevent infinite loop.`;
-    }
     if (this.isNoProgressDetected()) {
-      return `No progress detected for ${this.config.maxNoProgressRounds} consecutive rounds. Stopping.`;
+      return `No progress detected for ${this.config.maxNoProgressRounds} consecutive rounds. All phases completed.`;
     }
     return null;
   }
@@ -977,7 +965,6 @@ export class AgentSessionManager {
         findings: [],
         tool_history: [],
         step_count: 0,
-        max_steps: 30,
         no_progress_count: 0
       })
       .select()

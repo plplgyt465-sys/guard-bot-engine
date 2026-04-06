@@ -47,7 +47,6 @@ const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || SUPABASE_ANON_KEY;
 
 // AI Configuration
-const MAX_STEPS_PER_REQUEST = 10; // Max steps in a single HTTP request
 const TOOL_TIMEOUT_MS = 30_000;
 
 interface AgentRequest {
@@ -56,7 +55,6 @@ interface AgentRequest {
   target?: string;
   intent?: string;
   agentSessionId?: string;
-  maxSteps?: number;
   // Exploit intelligence options
   riskTolerance?: 'low' | 'medium' | 'high';
   hasAuthorization?: boolean;
@@ -397,7 +395,7 @@ async function runAgentStep(
   }
   
   const currentPhase = phaseController.getCurrentPhase();
-  send(`\n[${currentPhase}] Step ${session.step_count + 1}/${session.max_steps}\n`);
+  send(`\n[${currentPhase}] Step ${session.step_count + 1}\n`);
   
   // Get available tools for decision context
   const availableTools = [
@@ -656,7 +654,7 @@ serve(async (req) => {
 
   try {
     const body: AgentRequest = await req.json();
-    const { action, chatSessionId, target, intent, agentSessionId, maxSteps } = body;
+        const { action, chatSessionId, target, intent, agentSessionId } = body;
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
     const sessionManager = new AgentSessionManager(supabase);
@@ -741,14 +739,12 @@ serve(async (req) => {
           isProduction: body.isProduction || false,
         };
 
-        // Run agent loop in background
+        // Run agent loop — continues until goal is reached (no step cap)
         (async () => {
           let currentSession = session;
-          let stepsThisRequest = 0;
-          const maxStepsThisRequest = maxSteps || MAX_STEPS_PER_REQUEST;
           
           try {
-            while (stepsThisRequest < maxStepsThisRequest) {
+            while (true) {
               const { session: updatedSession, shouldContinue, decision, feedbackResult } = await runAgentStep(
                 currentSession,
                 supabase,
@@ -758,20 +754,16 @@ serve(async (req) => {
               );
               
               currentSession = updatedSession;
-              stepsThisRequest++;
               
               if (!shouldContinue) {
                 break;
               }
-              
-              // Small delay to prevent overwhelming
-              await new Promise(r => setTimeout(r, 500));
             }
             
             // Send final status
             await send(`\n--- Session Status ---\n`);
             await send(`Phase: ${currentSession.phase}\n`);
-            await send(`Steps: ${currentSession.step_count}/${currentSession.max_steps}\n`);
+            await send(`Steps completed: ${currentSession.step_count}\n`);
             await send(`Findings: ${currentSession.findings.length}\n`);
             await send(`Vulnerabilities: ${currentSession.context.vulnerabilities.length}\n`);
             
@@ -786,7 +778,7 @@ serve(async (req) => {
               await writer.write(encoder.encode(`data: ${JSON.stringify({ 
                 type: 'paused', 
                 session: currentSession,
-                message: `Paused after ${stepsThisRequest} steps. Send 'continue' to resume.`,
+                message: `Agent paused at phase ${currentSession.phase}. Send 'continue' to resume.`,
               })}\n\n`));
             }
           } catch (e) {
