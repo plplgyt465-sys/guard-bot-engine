@@ -7,6 +7,7 @@ import { Component, ErrorInfo, ReactNode } from "react";
 import Index from "./pages/Index";
 import Terminal from "./pages/Terminal";
 import Install from "./pages/Install";
+import Tools from "./pages/Tools";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -61,6 +62,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/terminal" element={<Terminal />} />
           <Route path="/install" element={<Install />} />
+          <Route path="/tools" element={<Tools />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
