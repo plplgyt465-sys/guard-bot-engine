@@ -75,7 +75,7 @@ export async function streamChat({
   onError: (error: string) => void;
 }) {
   const session = sessionId || `chat_${Date.now()}`;
-  const gemini = new GeminiUnofficial(session);
+  const gemini = new GeminiUnofficial(session, 'gemini-3.1-pro-preview');
   const skills = new SkillsEngine(session);
 
   // Get the latest user message
@@ -160,7 +160,7 @@ export async function chat({
   useSkills?: boolean;
 }): Promise<string> {
   const session = sessionId || `chat_${Date.now()}`;
-  const gemini = new GeminiUnofficial(session);
+  const gemini = new GeminiUnofficial(session, 'gemini-3.1-pro-preview');
   const skills = new SkillsEngine(session);
 
   // Try skill first
@@ -206,7 +206,7 @@ export async function startAutonomousAgent({
   let aborted = false;
   const abort = () => { aborted = true; };
 
-  const gemini = new GeminiUnofficial(sessionId);
+  const gemini = new GeminiUnofficial(sessionId, 'gemini-3.1-pro-preview');
   const skills = new SkillsEngine(sessionId);
 
   const session: AgentSession = {
@@ -393,6 +393,6 @@ export function getSkillCount(): number {
  * Test Gemini connection
  */
 export async function testGeminiConnection(): Promise<{ success: boolean; model: string; error?: string }> {
-  const gemini = new GeminiUnofficial();
+  const gemini = new GeminiUnofficial(undefined, 'gemini-3.1-pro-preview');
   return gemini.testConnection();
 }

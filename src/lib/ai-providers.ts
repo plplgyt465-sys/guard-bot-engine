@@ -37,10 +37,10 @@ export interface AIProviderSettings {
   enabled: boolean;
 }
 
-// Default to Gemini 2.0 Flash
+// Default to Gemini 3.1 Pro (free via Puter.js)
 const DEFAULT_SETTINGS: AIProviderSettings = {
   providerId: 'gemini-unofficial',
-  modelId: 'gemini-2.0-flash-exp',
+  modelId: 'gemini-3.1-pro-preview',
   enabled: true
 };
 
@@ -87,7 +87,7 @@ export class UnifiedAIClient {
   constructor(sessionId?: string) {
     this.sessionId = sessionId || `unified_${Date.now()}`;
     const settings = getAIProviderSettings();
-    this.gemini = new GeminiUnofficial(this.sessionId, { model: settings.modelId });
+    this.gemini = new GeminiUnofficial(this.sessionId, settings.modelId);
     this.skills = new SkillsEngine(this.sessionId);
   }
 

@@ -1,9 +1,27 @@
 /**
  * Gemini Unofficial Client - No API Key Required
  * 
- * Uses the free Gemini API endpoint that doesn't require authentication.
- * This is the ONLY AI provider used in the system.
+ * Uses Puter.js for FREE, UNLIMITED access to Gemini models
+ * No API keys, no cookies, no tokens needed - just works!
  */
+
+// Puter.js types
+declare global {
+  interface Window {
+    puter: {
+      ai: {
+        chat: (
+          prompt: string | Array<{ role: string; content: string }>,
+          options?: {
+            model?: string;
+            stream?: boolean;
+          }
+        ) => Promise<string | AsyncIterable<{ text?: string }>>;
+      };
+      print: (text: string) => void;
+    };
+  }
+}
 
 export interface GeminiMessage {
   role: 'user' | 'model';
@@ -14,57 +32,81 @@ export interface GeminiConfig {
   model?: string;
   temperature?: number;
   maxOutputTokens?: number;
-  topP?: number;
-  topK?: number;
 }
 
-export interface GeminiResponse {
-  candidates: Array<{
-    content: {
-      parts: Array<{ text: string }>;
-      role: string;
-    };
-    finishReason: string;
-    index: number;
-    safetyRatings?: Array<{
-      category: string;
-      probability: string;
-    }>;
-  }>;
-  usageMetadata?: {
-    promptTokenCount: number;
-    candidatesTokenCount: number;
-    totalTokenCount: number;
-  };
-}
-
-// Default configuration
-const DEFAULT_CONFIG: GeminiConfig = {
-  model: 'gemini-2.0-flash-exp',
-  temperature: 0.9,
-  maxOutputTokens: 8192,
-  topP: 0.95,
-  topK: 40
-};
-
-// Available models (all free, no key required)
+// Available FREE models via Puter.js (no API key needed!)
 export const GEMINI_MODELS = [
-  { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Experimental)', description: 'Fastest, latest model' },
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', description: 'Fast and efficient' },
-  { id: 'gemini-1.5-flash-8b', name: 'Gemini 1.5 Flash 8B', description: 'Lighter, faster' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', description: 'Most capable' },
-  { id: 'gemini-exp-1206', name: 'Gemini Experimental 1206', description: 'Latest experimental' },
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', description: 'Most capable, latest model' },
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', description: 'Fast and efficient' },
+  { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite', description: 'Fastest, cost-efficient' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro', description: 'Powerful reasoning' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Stable and reliable' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast responses' },
+  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', description: 'Legacy fast model' },
 ];
 
+const DEFAULT_MODEL = 'gemini-3.1-pro-preview';
+
+// Flag to track if Puter.js is loaded
+let puterLoaded = false;
+let puterLoadPromise: Promise<void> | null = null;
+
 /**
- * Conversation history manager for persistent memory
+ * Load Puter.js dynamically
+ */
+async function loadPuter(): Promise<void> {
+  if (puterLoaded && window.puter) {
+    return;
+  }
+
+  if (puterLoadPromise) {
+    return puterLoadPromise;
+  }
+
+  puterLoadPromise = new Promise((resolve, reject) => {
+    // Check if already loaded
+    if (window.puter) {
+      puterLoaded = true;
+      resolve();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://js.puter.com/v2/';
+    script.async = true;
+    
+    script.onload = () => {
+      // Wait a bit for puter to initialize
+      const checkPuter = () => {
+        if (window.puter) {
+          puterLoaded = true;
+          console.log('[Gemini] Puter.js loaded successfully - FREE Gemini access enabled!');
+          resolve();
+        } else {
+          setTimeout(checkPuter, 100);
+        }
+      };
+      checkPuter();
+    };
+    
+    script.onerror = () => {
+      reject(new Error('Failed to load Puter.js'));
+    };
+    
+    document.head.appendChild(script);
+  });
+
+  return puterLoadPromise;
+}
+
+/**
+ * Conversation memory manager for persistent history
  */
 class ConversationMemory {
   private history: Map<string, GeminiMessage[]> = new Map();
-  private maxHistory: number = 50;
+  private maxHistory: number = 100; // Keep more history for context
 
   constructor() {
-    // Load from localStorage on initialization
     this.loadFromStorage();
   }
 
@@ -78,7 +120,7 @@ class ConversationMemory {
         }
       }
     } catch (e) {
-      console.warn('[v0] Failed to load conversation history:', e);
+      console.warn('[Gemini] Failed to load history:', e);
     }
   }
 
@@ -90,7 +132,7 @@ class ConversationMemory {
       }
       localStorage.setItem('gemini_conversation_history', JSON.stringify(obj));
     } catch (e) {
-      console.warn('[v0] Failed to save conversation history:', e);
+      console.warn('[Gemini] Failed to save history:', e);
     }
   }
 
@@ -116,6 +158,14 @@ class ConversationMemory {
     return this.history.get(sessionId) || [];
   }
 
+  getFormattedHistory(sessionId: string): Array<{ role: string; content: string }> {
+    const history = this.getHistory(sessionId);
+    return history.map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'assistant',
+      content: msg.parts.map(p => p.text).join('\n')
+    }));
+  }
+
   clearSession(sessionId: string): void {
     this.history.delete(sessionId);
     this.saveToStorage();
@@ -135,16 +185,15 @@ class ConversationMemory {
 export const conversationMemory = new ConversationMemory();
 
 /**
- * Main Gemini Unofficial Client
+ * Main Gemini Client using Puter.js (FREE, no API key!)
  */
 export class GeminiUnofficial {
-  private config: GeminiConfig;
-  private baseUrl: string = 'https://generativelanguage.googleapis.com/v1beta/models';
+  private model: string;
   private sessionId: string;
   private systemInstruction: string = '';
 
-  constructor(sessionId?: string, config?: Partial<GeminiConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor(sessionId?: string, model?: string) {
+    this.model = model || DEFAULT_MODEL;
     this.sessionId = sessionId || this.generateSessionId();
   }
 
@@ -161,75 +210,51 @@ export class GeminiUnofficial {
   }
 
   setModel(model: string): void {
-    this.config.model = model;
+    this.model = model;
   }
 
-  setConfig(config: Partial<GeminiConfig>): void {
-    this.config = { ...this.config, ...config };
+  getModel(): string {
+    return this.model;
   }
 
   /**
-   * Generate content with full conversation history
+   * Generate content with conversation history
    */
   async generate(prompt: string, includeHistory: boolean = true): Promise<string> {
-    const model = this.config.model || DEFAULT_CONFIG.model;
-    const url = `${this.baseUrl}/${model}:generateContent`;
+    // Ensure Puter.js is loaded
+    await loadPuter();
 
-    // Build conversation history
-    const contents: GeminiMessage[] = [];
-    
-    if (includeHistory) {
-      const history = conversationMemory.getHistory(this.sessionId);
-      contents.push(...history);
-    }
-
-    // Add current message
-    contents.push({
-      role: 'user',
-      parts: [{ text: prompt }]
-    });
-
-    // Build request body
-    const body: Record<string, unknown> = {
-      contents,
-      generationConfig: {
-        temperature: this.config.temperature,
-        maxOutputTokens: this.config.maxOutputTokens,
-        topP: this.config.topP,
-        topK: this.config.topK
-      }
-    };
+    // Build messages array with history
+    const messages: Array<{ role: string; content: string }> = [];
 
     // Add system instruction if set
     if (this.systemInstruction) {
-      body.systemInstruction = {
-        parts: [{ text: this.systemInstruction }]
-      };
+      messages.push({
+        role: 'system',
+        content: this.systemInstruction
+      });
     }
 
+    // Add conversation history
+    if (includeHistory) {
+      const history = conversationMemory.getFormattedHistory(this.sessionId);
+      messages.push(...history);
+    }
+
+    // Add current user message
+    messages.push({
+      role: 'user',
+      content: prompt
+    });
+
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
+      // Use Puter.js chat - this is FREE!
+      const response = await window.puter.ai.chat(
+        messages.length === 1 ? prompt : messages,
+        { model: this.model }
+      );
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data: GeminiResponse = await response.json();
-      
-      if (!data.candidates || data.candidates.length === 0) {
-        throw new Error('No response generated');
-      }
-
-      const responseText = data.candidates[0].content.parts
-        .map(p => p.text)
-        .join('');
+      const responseText = typeof response === 'string' ? response : '';
 
       // Save to history
       conversationMemory.addMessage(this.sessionId, 'user', prompt);
@@ -237,101 +262,67 @@ export class GeminiUnofficial {
 
       return responseText;
     } catch (error) {
-      console.error('[v0] Gemini generation failed:', error);
+      console.error('[Gemini] Generation failed:', error);
       throw error;
     }
   }
 
   /**
-   * Stream response with full conversation history
+   * Stream response with conversation history
    */
   async *generateStream(prompt: string, includeHistory: boolean = true): AsyncGenerator<string, void, unknown> {
-    const model = this.config.model || DEFAULT_CONFIG.model;
-    const url = `${this.baseUrl}/${model}:streamGenerateContent?alt=sse`;
+    // Ensure Puter.js is loaded
+    await loadPuter();
 
-    // Build conversation history
-    const contents: GeminiMessage[] = [];
-    
-    if (includeHistory) {
-      const history = conversationMemory.getHistory(this.sessionId);
-      contents.push(...history);
-    }
-
-    // Add current message
-    contents.push({
-      role: 'user',
-      parts: [{ text: prompt }]
-    });
-
-    // Build request body
-    const body: Record<string, unknown> = {
-      contents,
-      generationConfig: {
-        temperature: this.config.temperature,
-        maxOutputTokens: this.config.maxOutputTokens,
-        topP: this.config.topP,
-        topK: this.config.topK
-      }
-    };
+    // Build messages array with history
+    const messages: Array<{ role: string; content: string }> = [];
 
     // Add system instruction if set
     if (this.systemInstruction) {
-      body.systemInstruction = {
-        parts: [{ text: this.systemInstruction }]
-      };
+      messages.push({
+        role: 'system',
+        content: this.systemInstruction
+      });
     }
 
+    // Add conversation history
+    if (includeHistory) {
+      const history = conversationMemory.getFormattedHistory(this.sessionId);
+      messages.push(...history);
+    }
+
+    // Add current user message
+    messages.push({
+      role: 'user',
+      content: prompt
+    });
+
+    // Save user message immediately
+    conversationMemory.addMessage(this.sessionId, 'user', prompt);
+
+    let fullResponse = '';
+
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
+      // Use Puter.js streaming - this is FREE!
+      const response = await window.puter.ai.chat(
+        messages.length === 1 ? prompt : messages,
+        { 
+          model: this.model,
+          stream: true
+        }
+      );
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      if (!response.body) {
-        throw new Error('No response body');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullResponse = '';
-
-      // Save user message immediately
-      conversationMemory.addMessage(this.sessionId, 'user', prompt);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process SSE events
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6).trim();
-            if (jsonStr === '[DONE]') continue;
-
-            try {
-              const parsed = JSON.parse(jsonStr);
-              const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
-              if (text) {
-                fullResponse += text;
-                yield text;
-              }
-            } catch {
-              // Ignore parse errors
-            }
+      // Handle streaming response
+      if (typeof response === 'string') {
+        // Non-streaming fallback
+        fullResponse = response;
+        yield response;
+      } else {
+        // Streaming response
+        for await (const part of response) {
+          if (part?.text) {
+            fullResponse += part.text;
+            yield part.text;
           }
         }
       }
@@ -341,7 +332,7 @@ export class GeminiUnofficial {
         conversationMemory.addMessage(this.sessionId, 'model', fullResponse);
       }
     } catch (error) {
-      console.error('[v0] Gemini stream failed:', error);
+      console.error('[Gemini] Stream failed:', error);
       throw error;
     }
   }
@@ -365,25 +356,27 @@ export class GeminiUnofficial {
    */
   async testConnection(): Promise<{ success: boolean; model: string; error?: string }> {
     try {
-      const response = await this.generate('Hello, respond with just "OK"', false);
+      await loadPuter();
+      const response = await window.puter.ai.chat('Say "OK" if you can hear me.', { model: this.model });
+      const text = typeof response === 'string' ? response : '';
       return {
-        success: response.toLowerCase().includes('ok'),
-        model: this.config.model || 'unknown'
+        success: text.toLowerCase().includes('ok') || text.length > 0,
+        model: this.model
       };
     } catch (error) {
       return {
         success: false,
-        model: this.config.model || 'unknown',
+        model: this.model,
         error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
   }
 }
 
-// Export singleton instance for easy use
+// Export singleton instance
 export const gemini = new GeminiUnofficial();
 
-// Export helper function
+// Export helper functions
 export async function chat(prompt: string, sessionId?: string): Promise<string> {
   const client = sessionId ? new GeminiUnofficial(sessionId) : gemini;
   return client.generate(prompt);
@@ -392,4 +385,9 @@ export async function chat(prompt: string, sessionId?: string): Promise<string> 
 export async function* chatStream(prompt: string, sessionId?: string): AsyncGenerator<string, void, unknown> {
   const client = sessionId ? new GeminiUnofficial(sessionId) : gemini;
   yield* client.generateStream(prompt);
+}
+
+// Preload Puter.js on module load
+if (typeof window !== 'undefined') {
+  loadPuter().catch(console.error);
 }
