@@ -125,7 +125,15 @@ const Index = () => {
       await streamChat({
         messages: newMessages,
         customSystemPrompt: getAgentCustomPrompt() || undefined,
+        sessionId: sessionId!,
+        useSkills: true,
         onDelta: (chunk) => upsertAssistant(chunk),
+        onSkillSelected: (skill) => {
+          console.log('[v0] Skill selected:', skill.name);
+        },
+        onPhaseChange: (phase) => {
+          console.log('[v0] Phase:', phase);
+        },
         onDone: () => {
           setIsLoading(false);
           // Save after streaming completes
@@ -142,7 +150,7 @@ const Index = () => {
     } catch (e) {
       console.error(e);
       setIsLoading(false);
-      toast({ title: "خطأ", description: "فشل الاتصال بالوكيل", variant: "destructive" });
+      toast({ title: "خطأ", description: "فشل الاتصال بـ Gemini", variant: "destructive" });
     }
   };
 

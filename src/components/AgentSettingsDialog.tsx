@@ -1,17 +1,16 @@
 import { useState, useEffect } from "react";
-import { Settings, Eye, EyeOff, Cpu, Plus, Trash2, RefreshCw, CheckCircle, XCircle, AlertCircle, Shield } from "lucide-react";
+import { Settings, Cpu, CheckCircle, XCircle, Sparkles, Brain, Zap } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { AI_PROVIDERS, SECURITY_API_PROVIDERS, getAIProviderSettings, saveAIProviderSettings, clearAIProviderSettings, type AIProviderSettings, type APIKeyEntry, type ProviderKeysMap } from "@/lib/ai-providers";
+import { AI_PROVIDERS, GEMINI_MODELS, getAIProviderSettings, saveAIProviderSettings, clearAIProviderSettings } from "@/lib/ai-providers";
+import { testGeminiConnection, getSkillCount, getAvailableSkills } from "@/lib/chat-stream";
 
 const STORAGE_KEY = "cyberguard-agent-settings";
 
@@ -26,216 +25,62 @@ export function getAgentCustomPrompt(): string {
 export function AgentSettingsDialog() {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [showKeys, setShowKeys] = useState<Record<string, Record<number, boolean>>>({});
+  const [selectedModel, setSelectedModel] = useState("gemini-2.0-flash-exp");
+  const [connectionStatus, setConnectionStatus] = useState<'unknown' | 'testing' | 'connected' | 'error'>('unknown');
+  const [skillCount, setSkillCount] = useState(0);
   const { toast } = useToast();
-
-  const [providerEnabled, setProviderEnabled] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState("openai");
-  const [selectedModel, setSelectedModel] = useState("");
-  const [providerKeys, setProviderKeys] = useState<ProviderKeysMap>({});
-  const [checkingKey, setCheckingKey] = useState<string | null>(null); // "providerId-index"
 
   useEffect(() => {
     if (open) {
       setPrompt(getAgentCustomPrompt());
-      (async () => {
-        const settings = await getAIProviderSettings();
-        if (settings) {
-          setProviderEnabled(settings.enabled);
-          setSelectedProvider(settings.providerId);
-          setSelectedModel(settings.modelId);
-          setProviderKeys(settings.providerKeys || {});
-        } else {
-          setProviderEnabled(false);
-          setSelectedProvider("openai");
-          setSelectedModel("");
-          setProviderKeys({});
-        }
-      })();
-      setShowKeys({});
+      const settings = getAIProviderSettings();
+      setSelectedModel(settings.modelId || "gemini-2.0-flash-exp");
+      setSkillCount(getSkillCount());
     }
   }, [open]);
 
-  const currentProvider = AI_PROVIDERS.find(p => p.id === selectedProvider);
-
-  useEffect(() => {
-    if (currentProvider && !currentProvider.models.find(m => m.id === selectedModel)) {
-      setSelectedModel(currentProvider.models[0]?.id || "");
-    }
-  }, [selectedProvider]);
-
-  // Per-provider key helpers
-  const getKeysForProvider = (providerId: string): APIKeyEntry[] => providerKeys[providerId] || [];
-
-  const setKeysForProvider = (providerId: string, keys: APIKeyEntry[]) => {
-    setProviderKeys(prev => ({ ...prev, [providerId]: keys }));
-  };
-
-  const addKey = (providerId: string) => {
-    const current = getKeysForProvider(providerId);
-    setKeysForProvider(providerId, [...current, { key: "", label: `مفتاح ${current.length + 1}`, status: "unknown" }]);
-  };
-
-  const removeKey = (providerId: string, index: number) => {
-    setKeysForProvider(providerId, getKeysForProvider(providerId).filter((_, i) => i !== index));
-  };
-
-  const updateKey = (providerId: string, index: number, field: keyof APIKeyEntry, value: string) => {
-    setKeysForProvider(providerId, getKeysForProvider(providerId).map((k, i) => i === index ? { ...k, [field]: value } : k));
-  };
-
-  const checkKeyBalance = async (providerId: string, index: number) => {
-    const keys = getKeysForProvider(providerId);
-    const entry = keys[index];
-    if (!entry?.key.trim()) return;
-    const checkId = `${providerId}-${index}`;
-    setCheckingKey(checkId);
+  const testConnection = async () => {
+    setConnectionStatus('testing');
     try {
-      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/check-api-balance`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
-        body: JSON.stringify({ providerId, apiKey: entry.key }),
-      });
-      const data = await resp.json();
-      setKeysForProvider(providerId, keys.map((k, i) => i === index ? { ...k, status: data.status || "unknown", balance: data.balance || "غير متاح", lastChecked: Date.now() } : k));
-    } catch {
-      setKeysForProvider(providerId, keys.map((k, i) => i === index ? { ...k, status: "invalid", balance: "فشل الفحص" } : k));
-    }
-    setCheckingKey(null);
-  };
-
-  const checkAllKeysForProvider = async (providerId: string) => {
-    const keys = getKeysForProvider(providerId);
-    for (let i = 0; i < keys.length; i++) {
-      if (keys[i].key.trim()) await checkKeyBalance(providerId, i);
+      const result = await testGeminiConnection();
+      setConnectionStatus(result.success ? 'connected' : 'error');
+      if (result.success) {
+        toast({ title: "متصل!", description: `Gemini ${result.model} يعمل بشكل صحيح` });
+      } else {
+        toast({ title: "خطأ في الاتصال", description: result.error || "فشل الاتصال", variant: "destructive" });
+      }
+    } catch (e) {
+      setConnectionStatus('error');
+      toast({ title: "خطأ", description: "فشل اختبار الاتصال", variant: "destructive" });
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = () => {
     localStorage.setItem(STORAGE_KEY, prompt);
-    // Clean empty keys from all providers
-    const cleanedKeys: ProviderKeysMap = {};
-    for (const [pid, keys] of Object.entries(providerKeys)) {
-      const valid = keys.filter(k => k.key.trim());
-      if (valid.length > 0) cleanedKeys[pid] = valid;
-    }
-    const activeKeys = cleanedKeys[selectedProvider] || [];
-    await saveAIProviderSettings({
-      providerId: selectedProvider,
+    saveAIProviderSettings({
+      providerId: 'gemini-unofficial',
       modelId: selectedModel,
-      apiKey: activeKeys[0]?.key || "",
-      apiKeys: activeKeys,
-      providerKeys: cleanedKeys,
-      enabled: providerEnabled,
+      enabled: true
     });
     toast({ title: "تم الحفظ", description: "تم حفظ جميع الإعدادات بنجاح" });
     setOpen(false);
   };
 
-  const handleReset = async () => {
+  const handleReset = () => {
     setPrompt("");
-    setProviderEnabled(false);
-    setProviderKeys({});
+    setSelectedModel("gemini-2.0-flash-exp");
     localStorage.removeItem(STORAGE_KEY);
-    await clearAIProviderSettings();
+    clearAIProviderSettings();
     toast({ title: "تم إعادة التعيين", description: "تم إعادة الوكيل للإعدادات الافتراضية" });
   };
 
-  const getStatusIcon = (status?: string) => {
-    switch (status) {
-      case "valid": return <CheckCircle className="w-4 h-4 text-green-500" />;
-      case "invalid": return <XCircle className="w-4 h-4 text-red-500" />;
-      case "no_balance": return <AlertCircle className="w-4 h-4 text-yellow-500" />;
-      default: return <AlertCircle className="w-4 h-4 text-muted-foreground" />;
+  const getConnectionIcon = () => {
+    switch (connectionStatus) {
+      case 'testing': return <Cpu className="w-4 h-4 animate-spin" />;
+      case 'connected': return <CheckCircle className="w-4 h-4 text-green-500" />;
+      case 'error': return <XCircle className="w-4 h-4 text-red-500" />;
+      default: return <Cpu className="w-4 h-4" />;
     }
-  };
-
-  const getStatusText = (entry: APIKeyEntry) => {
-    if (!entry.status || entry.status === "unknown") return "لم يُفحص";
-    if (entry.status === "valid") return entry.balance || "✓ صالح";
-    if (entry.status === "invalid") return "❌ غير صالح";
-    if (entry.status === "no_balance") return "⚠️ لا رصيد";
-    return "غير معروف";
-  };
-
-  const getStatusColor = (status?: string) => {
-    switch (status) {
-      case "valid": return "text-green-500";
-      case "invalid": return "text-red-500";
-      case "no_balance": return "text-yellow-500";
-      default: return "text-muted-foreground";
-    }
-  };
-
-  const getProviderKeyCount = (providerId: string) => {
-    return (providerKeys[providerId] || []).filter(k => k.key.trim()).length;
-  };
-
-  const renderProviderKeys = (providerId: string) => {
-    const provider = AI_PROVIDERS.find(p => p.id === providerId);
-    const keys = getKeysForProvider(providerId);
-    const providerShowKeys = showKeys[providerId] || {};
-
-    return (
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <Label className="text-foreground text-xs">مفاتيح {provider?.name}</Label>
-          <div className="flex items-center gap-2">
-            {provider && (
-              <a href={provider.apiKeyUrl} target="_blank" rel="noopener noreferrer"
-                className="text-[11px] text-primary hover:underline flex items-center gap-1">
-                🔑 احصل على مفتاح
-              </a>
-            )}
-            {keys.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={() => checkAllKeysForProvider(providerId)} className="h-6 text-[11px] gap-1">
-                <RefreshCw className="w-3 h-3" /> فحص الكل
-              </Button>
-            )}
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          {keys.map((entry, index) => (
-            <div key={index} className="p-3 rounded-lg border border-border bg-card space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <Input value={entry.label} onChange={(e) => updateKey(providerId, index, "label", e.target.value)}
-                  className="h-7 text-xs bg-background w-32" dir="rtl" placeholder="اسم المفتاح" />
-                <div className="flex items-center gap-1.5">
-                  <div className={`flex items-center gap-1 text-[10px] ${getStatusColor(entry.status)}`}>
-                    {getStatusIcon(entry.status)}
-                    <span>{getStatusText(entry)}</span>
-                  </div>
-                  <Button variant="ghost" size="sm" onClick={() => checkKeyBalance(providerId, index)}
-                    disabled={checkingKey === `${providerId}-${index}` || !entry.key.trim()} className="h-6 w-6 p-0">
-                    <RefreshCw className={`w-3 h-3 ${checkingKey === `${providerId}-${index}` ? "animate-spin" : ""}`} />
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => removeKey(providerId, index)}
-                    className="h-6 w-6 p-0 text-destructive hover:text-destructive">
-                    <Trash2 className="w-3 h-3" />
-                  </Button>
-                </div>
-              </div>
-              <div className="relative">
-                <Input type={providerShowKeys[index] ? "text" : "password"} value={entry.key}
-                  onChange={(e) => updateKey(providerId, index, "key", e.target.value)}
-                  placeholder={`أدخل مفتاح ${provider?.name || ""} API...`}
-                  className="bg-background pl-10 text-xs" dir="ltr" />
-                <button type="button"
-                  onClick={() => setShowKeys(prev => ({ ...prev, [providerId]: { ...(prev[providerId] || {}), [index]: !providerShowKeys[index] } }))}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                  {providerShowKeys[index] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <Button variant="outline" size="sm" onClick={() => addKey(providerId)} className="w-full gap-1.5 text-xs">
-          <Plus className="w-3.5 h-3.5" /> إضافة مفتاح جديد
-        </Button>
-      </div>
-    );
   };
 
   return (
@@ -248,15 +93,136 @@ export function AgentSettingsDialog() {
       </DialogTrigger>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto" dir="rtl">
         <DialogHeader>
-          <DialogTitle className="text-foreground">إعدادات الوكيل</DialogTitle>
+          <DialogTitle className="text-foreground flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-primary" />
+            إعدادات الوكيل
+          </DialogTitle>
         </DialogHeader>
 
-        <Tabs defaultValue="prompt" className="w-full">
+        <Tabs defaultValue="ai" className="w-full">
           <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="ai">🤖 Gemini AI</TabsTrigger>
+            <TabsTrigger value="skills">⚡ المهارات ({skillCount})</TabsTrigger>
             <TabsTrigger value="prompt">🧠 شخصية الوكيل</TabsTrigger>
-            <TabsTrigger value="ai">🤖 مزود الذكاء</TabsTrigger>
-            <TabsTrigger value="security">🛡️ APIs أمنية</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="ai" className="space-y-4 mt-4">
+            {/* Gemini Status */}
+            <div className="p-4 rounded-lg border border-primary/30 bg-primary/5">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center">
+                    <Brain className="w-5 h-5 text-primary" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-foreground">Gemini Unofficial</h3>
+                    <p className="text-xs text-muted-foreground">مجاني بالكامل - لا يحتاج مفاتيح</p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" onClick={testConnection} disabled={connectionStatus === 'testing'}>
+                  {getConnectionIcon()}
+                  <span className="mr-2">اختبار الاتصال</span>
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-2 text-sm">
+                <Zap className="w-4 h-4 text-yellow-500" />
+                <span className="text-muted-foreground">
+                  {connectionStatus === 'connected' ? 'متصل ويعمل!' : 
+                   connectionStatus === 'error' ? 'خطأ في الاتصال' :
+                   connectionStatus === 'testing' ? 'جاري الاختبار...' :
+                   'انقر لاختبار الاتصال'}
+                </span>
+              </div>
+            </div>
+
+            {/* Model Selection */}
+            <div className="space-y-3">
+              <Label className="text-foreground">اختر الموديل</Label>
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="bg-background">
+                  <SelectValue placeholder="اختر موديل..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {GEMINI_MODELS.map(model => (
+                    <SelectItem key={model.id} value={model.id}>
+                      <div className="flex flex-col">
+                        <span>{model.name}</span>
+                        <span className="text-xs text-muted-foreground">{model.description}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Info Box */}
+            <div className="p-4 rounded-lg bg-muted/30 border border-border space-y-2">
+              <h4 className="font-medium text-foreground flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-primary" />
+                لماذا Gemini الغير رسمي؟
+              </h4>
+              <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
+                <li>مجاني 100% - لا حاجة لمفاتيح API</li>
+                <li>لا حاجة لملفات cookies أو tokens</li>
+                <li>يعمل مباشرة من المتصفح</li>
+                <li>يدعم جميع موديلات Gemini الحديثة</li>
+                <li>ذاكرة محادثة كاملة ومستمرة</li>
+              </ul>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="skills" className="space-y-4 mt-4">
+            {/* Skills Overview */}
+            <div className="p-4 rounded-lg border border-primary/30 bg-primary/5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="font-semibold text-foreground">{skillCount}+ مهارة متاحة</h3>
+                  <p className="text-xs text-muted-foreground">يختار الوكيل المهارة المناسبة تلقائياً</p>
+                </div>
+                <div className="text-3xl font-bold text-primary">{skillCount}</div>
+              </div>
+            </div>
+
+            {/* Skill Categories */}
+            <div className="space-y-3">
+              <Label className="text-foreground">الفئات المتاحة</Label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { id: 'sales', name: 'المبيعات', icon: '💼', count: 50 },
+                  { id: 'marketing', name: 'التسويق', icon: '📈', count: 50 },
+                  { id: 'finance', name: 'المالية', icon: '💰', count: 40 },
+                  { id: 'hr', name: 'الموارد البشرية', icon: '👥', count: 40 },
+                  { id: 'operations', name: 'العمليات', icon: '⚙️', count: 30 },
+                  { id: 'product', name: 'المنتج', icon: '📦', count: 30 },
+                  { id: 'tech', name: 'التقنية', icon: '💻', count: 30 },
+                  { id: 'c-suite', name: 'القيادة', icon: '👔', count: 20 },
+                  { id: 'security', name: 'الأمن', icon: '🛡️', count: 30 },
+                  { id: 'general', name: 'عام', icon: '✨', count: 40 },
+                ].map(cat => (
+                  <div key={cat.id} className="p-3 rounded-lg border border-border bg-card flex items-center gap-3">
+                    <span className="text-xl">{cat.icon}</span>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-foreground">{cat.name}</p>
+                      <p className="text-xs text-muted-foreground">{cat.count} مهارة</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* How it works */}
+            <div className="p-4 rounded-lg bg-muted/30 border border-border space-y-2">
+              <h4 className="font-medium text-foreground">كيف يعمل؟</h4>
+              <ol className="text-sm text-muted-foreground space-y-1 list-decimal list-inside">
+                <li>تكتب طلبك بشكل طبيعي</li>
+                <li>الوكيل يحلل الطلب ويحدد المهارة المناسبة</li>
+                <li>يستخرج المعلومات المطلوبة من طلبك</li>
+                <li>ينفذ المهارة ويقدم النتيجة</li>
+                <li>يتحقق من جودة النتيجة ويصححها إذا لزم</li>
+              </ol>
+            </div>
+          </TabsContent>
 
           <TabsContent value="prompt" className="space-y-3 mt-4">
             <Label htmlFor="agent-prompt" className="text-foreground">
@@ -265,133 +231,17 @@ export function AgentSettingsDialog() {
             <p className="text-xs text-muted-foreground">
               اكتب هنا التعليمات المخصصة التي تريد أن يتبعها الوكيل.
             </p>
-            <Textarea id="agent-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)}
-              placeholder={`مثال:\nأنت خبير أمن سيبراني محترف اسمك "حارس".\nتتحدث بالعربية الفصحى فقط.\nتقدم تحليلات مفصلة مع توصيات عملية.`}
-              className="min-h-[200px] text-sm font-mono bg-background text-foreground" dir="rtl" />
+            <Textarea 
+              id="agent-prompt" 
+              value={prompt} 
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={`مثال:\nأنت خبير أعمال محترف اسمك "المساعد الذكي".\nتتحدث بالعربية الفصحى فقط.\nتقدم تحليلات مفصلة مع توصيات عملية.`}
+              className="min-h-[200px] text-sm font-mono bg-background text-foreground" 
+              dir="rtl" 
+            />
             <p className="text-[11px] text-muted-foreground">
-              {prompt.length > 0 ? `${prompt.length} حرف` : "لا توجد تعليمات مخصصة"}
+              {prompt.length > 0 ? `${prompt.length} حرف` : "لا توجد تعليمات مخصصة - سيستخدم الوكيل المهارات مباشرة"}
             </p>
-          </TabsContent>
-
-          <TabsContent value="ai" className="space-y-4 mt-4">
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
-              <div className="flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-primary" />
-                <div>
-                  <p className="text-sm font-medium text-foreground">استخدام مزود ذكاء مخصص</p>
-                  <p className="text-[11px] text-muted-foreground">بدلاً من المزود الافتراضي</p>
-                </div>
-              </div>
-              <Switch checked={providerEnabled} onCheckedChange={setProviderEnabled} />
-            </div>
-
-            <div className="space-y-4">
-              {/* Provider Selection */}
-              <div className="space-y-2">
-                <Label className="text-foreground">اختر المزود النشط</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {AI_PROVIDERS.map(provider => {
-                    const keyCount = getProviderKeyCount(provider.id);
-                    return (
-                      <button key={provider.id} onClick={() => setSelectedProvider(provider.id)}
-                        className={`p-3 rounded-lg border text-sm font-medium transition-all text-center relative ${
-                          selectedProvider === provider.id
-                            ? "border-primary bg-primary/10 text-primary shadow-sm"
-                            : "border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                        }`}>
-                        <div className="font-semibold">{provider.name}</div>
-                        <div className="text-[10px] opacity-70">{provider.nameAr}</div>
-                        {keyCount > 0 && (
-                          <span className="absolute top-1 left-1 bg-primary text-primary-foreground text-[9px] rounded-full w-4 h-4 flex items-center justify-center">
-                            {keyCount}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Model Selection */}
-              {currentProvider && (
-                <div className="space-y-2">
-                  <Label className="text-foreground">اختر الموديل</Label>
-                  <Select value={selectedModel} onValueChange={setSelectedModel}>
-                    <SelectTrigger className="bg-background">
-                      <SelectValue placeholder="اختر موديل..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {currentProvider.models.map(model => (
-                        <SelectItem key={model.id} value={model.id}>{model.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-
-              {/* API Keys - per provider */}
-              <div className="space-y-2">
-                <p className="text-[10px] text-muted-foreground">
-                  كل مزود له مفاتيحه الخاصة — عند فشل مفتاح يتم تجربة المفتاح التالي تلقائياً.
-                </p>
-                {renderProviderKeys(selectedProvider)}
-              </div>
-
-              {/* Summary of all providers with keys */}
-              {Object.keys(providerKeys).filter(pid => pid !== selectedProvider && (providerKeys[pid] || []).some(k => k.key.trim())).length > 0 && (
-                <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-2">
-                  <Label className="text-foreground text-xs">مفاتيح المزودين الآخرين</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {AI_PROVIDERS.filter(p => p.id !== selectedProvider && getProviderKeyCount(p.id) > 0).map(p => (
-                      <button key={p.id} onClick={() => setSelectedProvider(p.id)}
-                        className="text-[11px] px-2 py-1 rounded border border-border bg-card hover:border-primary/50 transition-colors flex items-center gap-1">
-                        <span>{p.name}</span>
-                        <span className="bg-primary/20 text-primary rounded-full px-1.5 text-[9px]">{getProviderKeyCount(p.id)}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Info */}
-              <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
-                <p>⚡ عند التفعيل، سيستخدم الوكيل المزود والموديل المختار بدل الافتراضي.</p>
-                <p>🔄 عند فشل مفتاح (انتهاء الرصيد أو خطأ)، يتم تجربة المفتاح التالي تلقائياً.</p>
-                <p>🔑 كل مزود يحتفظ بمفاتيحه بشكل مستقل.</p>
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="security" className="space-y-4 mt-4">
-            <div className="p-3 rounded-lg border border-border bg-muted/30">
-              <div className="flex items-center gap-2 mb-2">
-                <Shield className="w-4 h-4 text-primary" />
-                <p className="text-sm font-medium text-foreground">مفاتيح APIs الأمنية</p>
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                أضف مفاتيح API لخدمات الأمان الخارجية. الوكيل والأدوات ستستخدمها تلقائياً.
-              </p>
-            </div>
-
-            {SECURITY_API_PROVIDERS.map(provider => (
-              <div key={provider.id} className="space-y-3 p-3 rounded-lg border border-border">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">{provider.name}</p>
-                    <p className="text-[10px] text-muted-foreground">{provider.description}</p>
-                  </div>
-                  <a href={provider.apiKeyUrl} target="_blank" rel="noopener noreferrer"
-                    className="text-[11px] text-primary hover:underline">🔑 احصل على مفتاح</a>
-                </div>
-                {renderProviderKeys(provider.id)}
-              </div>
-            ))}
-
-            <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground space-y-1">
-              <p>🛡️ مفاتيح VirusTotal تُستخدم تلقائياً في جميع الأدوات المستوردة من GitHub.</p>
-              <p>🔄 عند فشل مفتاح، يتم تجربة المفتاح التالي تلقائياً.</p>
-              <p>♾️ يمكنك إضافة عدد غير محدود من المفاتيح.</p>
-            </div>
           </TabsContent>
         </Tabs>
 

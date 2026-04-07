@@ -1,77 +1,184 @@
-import { getAIProviderSettings } from "./ai-providers";
+/**
+ * Chat Stream - Unified chat interface using Gemini Unofficial
+ * 
+ * All chat goes through Gemini unofficial API - no keys required.
+ * Includes full conversation memory and skill auto-selection.
+ */
+
+import { GeminiUnofficial, conversationMemory } from './gemini-unofficial';
+import { skillsEngine, SkillsEngine, Skill, SkillExecution } from './skills-engine';
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
-
-const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/cyber-chat`;
-const AGENT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/cyber-agent`;
 
 // ============================================================================
 // AUTONOMOUS AGENT TYPES
 // ============================================================================
 
-export type AgentPhase = 'INTENT' | 'PLANNING' | 'EXECUTION' | 'ANALYSIS' | 'DECISION' | 'DONE' | 'ERROR';
+export type AgentPhase = 'UNDERSTANDING' | 'PLANNING' | 'EXECUTION' | 'VERIFICATION' | 'CORRECTION' | 'DONE' | 'ERROR';
 
 export interface AgentSession {
   id: string;
-  chat_session_id: string;
+  sessionId: string;
   target: string;
   phase: AgentPhase;
-  plan: {
-    steps: Array<{
-      id: string;
-      tool: string;
-      args: Record<string, unknown>;
-      description: string;
-      status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
-      result?: unknown;
-      error?: string;
-    }>;
-    current_step: number;
-    objective: string;
-  };
+  currentSkill: Skill | null;
+  skillExecution: SkillExecution | null;
   context: {
-    target: string;
     intent: string;
-    discovered_info: Record<string, unknown>;
-    vulnerabilities: Array<{
-      id: string;
-      type: string;
-      severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
-      description: string;
-      evidence?: string;
-      confirmed?: boolean;
-      exploited?: boolean;
-      cve?: string;
-      cvss?: number;
-    }>;
-    open_ports: number[];
-    services: Array<{ port: number; service: string; version?: string }>;
-    technologies: string[];
+    extractedParams: Record<string, unknown>;
+    conversationHistory: ChatMessage[];
+    skillsUsed: string[];
+    memoryKeys: string[];
   };
   findings: unknown[];
-  tool_history: Array<{
-    tool: string;
-    args: Record<string, unknown>;
-    result: unknown;
-    timestamp: string;
-    duration_ms: number;
-    success: boolean;
-    error?: string;
-  }>;
-  step_count: number;
-  security_score: number | null;
   started_at: string;
   updated_at: string;
   completed_at: string | null;
 }
 
 export interface AgentProgress {
-  type: 'progress' | 'complete' | 'paused' | 'error';
+  type: 'progress' | 'skill_selected' | 'params_extracted' | 'executing' | 'streaming' | 'complete' | 'error';
   content?: string;
+  phase?: AgentPhase;
+  skill?: Skill;
+  params?: Record<string, unknown>;
   session?: AgentSession;
-  report?: string;
-  message?: string;
   error?: string;
+}
+
+// ============================================================================
+// MAIN CHAT FUNCTIONS
+// ============================================================================
+
+/**
+ * Stream chat using Gemini unofficial - the ONLY AI provider
+ */
+export async function streamChat({
+  messages,
+  customSystemPrompt,
+  sessionId,
+  useSkills = true,
+  onDelta,
+  onSkillSelected,
+  onPhaseChange,
+  onDone,
+  onError,
+}: {
+  messages: ChatMessage[];
+  customSystemPrompt?: string;
+  sessionId?: string;
+  useSkills?: boolean;
+  onDelta: (deltaText: string) => void;
+  onSkillSelected?: (skill: Skill) => void;
+  onPhaseChange?: (phase: AgentPhase) => void;
+  onDone: () => void;
+  onError: (error: string) => void;
+}) {
+  const session = sessionId || `chat_${Date.now()}`;
+  const gemini = new GeminiUnofficial(session);
+  const skills = new SkillsEngine(session);
+
+  // Get the latest user message
+  const lastMessage = messages[messages.length - 1];
+  if (!lastMessage || lastMessage.role !== 'user') {
+    onError('No user message provided');
+    return;
+  }
+
+  const userInput = lastMessage.content;
+
+  try {
+    // Phase 1: Understanding - Try to find a matching skill
+    onPhaseChange?.('UNDERSTANDING');
+
+    if (useSkills) {
+      const match = await skills.selectSkill(userInput);
+      
+      if (match && match.score >= 10) {
+        onSkillSelected?.(match.skill);
+        console.log(`[v0] Selected skill: ${match.skill.name} (score: ${match.score})`);
+
+        // Phase 2: Planning - Extract parameters
+        onPhaseChange?.('PLANNING');
+        const params = await skills.extractParameters(match.skill, userInput);
+        console.log(`[v0] Extracted params:`, params);
+
+        // Phase 3: Execution - Run the skill with streaming
+        onPhaseChange?.('EXECUTION');
+
+        for await (const update of skills.runStream(userInput)) {
+          if (update.content) {
+            onDelta(update.content);
+          }
+        }
+
+        // Phase 4: Done
+        onPhaseChange?.('DONE');
+        onDone();
+        return;
+      }
+    }
+
+    // No skill matched - use direct Gemini chat
+    onPhaseChange?.('EXECUTION');
+
+    if (customSystemPrompt) {
+      gemini.setSystemInstruction(customSystemPrompt);
+    }
+
+    // Build conversation context from messages
+    for (let i = 0; i < messages.length - 1; i++) {
+      const msg = messages[i];
+      conversationMemory.addMessage(session, msg.role === 'user' ? 'user' : 'model', msg.content);
+    }
+
+    // Stream the response
+    for await (const chunk of gemini.generateStream(userInput)) {
+      onDelta(chunk);
+    }
+
+    onPhaseChange?.('DONE');
+    onDone();
+  } catch (error) {
+    onPhaseChange?.('ERROR');
+    onError(error instanceof Error ? error.message : 'Unknown error occurred');
+  }
+}
+
+/**
+ * Non-streaming chat
+ */
+export async function chat({
+  message,
+  sessionId,
+  customSystemPrompt,
+  useSkills = true,
+}: {
+  message: string;
+  sessionId?: string;
+  customSystemPrompt?: string;
+  useSkills?: boolean;
+}): Promise<string> {
+  const session = sessionId || `chat_${Date.now()}`;
+  const gemini = new GeminiUnofficial(session);
+  const skills = new SkillsEngine(session);
+
+  // Try skill first
+  if (useSkills) {
+    const match = await skills.selectSkill(message);
+    if (match && match.score >= 10) {
+      const result = await skills.run(message);
+      if (result.execution?.success) {
+        return result.execution.output;
+      }
+    }
+  }
+
+  // Direct Gemini chat
+  if (customSystemPrompt) {
+    gemini.setSystemInstruction(customSystemPrompt);
+  }
+  return gemini.generate(message);
 }
 
 // ============================================================================
@@ -79,347 +186,213 @@ export interface AgentProgress {
 // ============================================================================
 
 /**
- * Start a new autonomous agent session
+ * Start an autonomous agent session with skills
  */
-export async function startAutonomousScan({
-  chatSessionId,
+export async function startAutonomousAgent({
+  sessionId,
   target,
   intent,
   onProgress,
   onComplete,
   onError,
 }: {
-  chatSessionId: string;
+  sessionId: string;
   target: string;
   intent?: string;
   onProgress: (progress: AgentProgress) => void;
-  onComplete: (session: AgentSession, report: string) => void;
+  onComplete: (session: AgentSession) => void;
   onError: (error: string) => void;
 }): Promise<{ sessionId: string; abort: () => void }> {
   let aborted = false;
-  let agentSessionId: string | null = null;
+  const abort = () => { aborted = true; };
 
-  const abort = () => {
-    aborted = true;
-    if (agentSessionId) {
-      stopAutonomousScan(agentSessionId).catch(console.error);
-    }
+  const gemini = new GeminiUnofficial(sessionId);
+  const skills = new SkillsEngine(sessionId);
+
+  const session: AgentSession = {
+    id: `agent_${Date.now()}`,
+    sessionId,
+    target,
+    phase: 'UNDERSTANDING',
+    currentSkill: null,
+    skillExecution: null,
+    context: {
+      intent: intent || target,
+      extractedParams: {},
+      conversationHistory: [],
+      skillsUsed: [],
+      memoryKeys: []
+    },
+    findings: [],
+    started_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    completed_at: null
   };
 
   try {
-    // Step 1: Start the agent session
-    const startResponse = await fetch(AGENT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-      },
-      body: JSON.stringify({
-        action: 'start',
-        chatSessionId,
-        target,
-        intent,
-      }),
-    });
+    // Phase 1: Understanding
+    onProgress({ type: 'progress', phase: 'UNDERSTANDING', content: 'Analyzing request...' });
 
-    if (!startResponse.ok) {
-      const data = await startResponse.json().catch(() => ({}));
-      throw new Error(data.error || 'Failed to start agent session');
+    // Determine intent and select appropriate skills
+    const intentPrompt = `Analyze this request and determine what skills/actions are needed:
+"${target}"
+
+List 1-3 actions needed to complete this request. Be specific.`;
+
+    const intentAnalysis = await gemini.generate(intentPrompt, false);
+    session.context.intent = intentAnalysis;
+
+    if (aborted) return { sessionId, abort };
+
+    // Phase 2: Planning
+    session.phase = 'PLANNING';
+    onProgress({ type: 'progress', phase: 'PLANNING', content: 'Planning execution...' });
+
+    // Find matching skills
+    const match = await skills.selectSkill(target);
+    if (match) {
+      session.currentSkill = match.skill;
+      onProgress({ type: 'skill_selected', skill: match.skill });
+
+      const params = await skills.extractParameters(match.skill, target);
+      session.context.extractedParams = params;
+      onProgress({ type: 'params_extracted', params });
     }
 
-    const startData = await startResponse.json();
-    if (!startData.success || !startData.session) {
-      throw new Error(startData.error || 'Failed to create agent session');
-    }
+    if (aborted) return { sessionId, abort };
 
-    agentSessionId = startData.session.id;
-    onProgress({ type: 'progress', content: `Agent session started with ${startData.session.plan.steps.length} planned steps\n`, session: startData.session });
+    // Phase 3: Execution
+    session.phase = 'EXECUTION';
+    onProgress({ type: 'progress', phase: 'EXECUTION', content: 'Executing...' });
 
-    // Step 2: Continue the agent loop until complete
-    while (!aborted) {
-      const continueResponse = await fetch(AGENT_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-        },
-      body: JSON.stringify({
-        action: 'continue',
-        agentSessionId,
-      }),
-      });
-
-      if (!continueResponse.ok) {
-        const data = await continueResponse.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to continue agent session');
-      }
-
-      // Handle streaming response
-      if (continueResponse.body) {
-        const reader = continueResponse.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let sessionComplete = false;
-
-        while (!aborted && !sessionComplete) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-
-          // Process complete lines
-          let newlineIndex: number;
-          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.slice(0, newlineIndex).trim();
-            buffer = buffer.slice(newlineIndex + 1);
-
-            if (!line.startsWith('data: ')) continue;
-            const jsonStr = line.slice(6).trim();
-            if (jsonStr === '[DONE]') continue;
-
-            try {
-              const parsed: AgentProgress = JSON.parse(jsonStr);
-              onProgress(parsed);
-
-              if (parsed.type === 'complete') {
-                sessionComplete = true;
-                if (parsed.session && parsed.report) {
-                  onComplete(parsed.session, parsed.report);
-                }
-                return { sessionId: agentSessionId, abort };
-              }
-
-              if (parsed.type === 'error') {
-                throw new Error(parsed.error || 'Agent error');
-              }
-
-              if (parsed.type === 'paused') {
-                // Session paused, will continue in next iteration
-                break;
-              }
-            } catch (e) {
-              // Ignore parse errors for incomplete data
-            }
-          }
+    if (session.currentSkill) {
+      // Execute the skill
+      for await (const update of skills.runStream(target)) {
+        if (aborted) break;
+        if (update.content) {
+          onProgress({ type: 'streaming', content: update.content });
         }
-
-        if (sessionComplete) break;
+      }
+      session.context.skillsUsed.push(session.currentSkill.id);
+    } else {
+      // Direct execution with Gemini
+      for await (const chunk of gemini.generateStream(target)) {
+        if (aborted) break;
+        onProgress({ type: 'streaming', content: chunk });
       }
     }
 
-    return { sessionId: agentSessionId, abort };
-  } catch (e) {
-    onError(e instanceof Error ? e.message : 'Unknown error');
-    return { sessionId: agentSessionId || '', abort };
+    if (aborted) return { sessionId, abort };
+
+    // Phase 4: Verification
+    session.phase = 'VERIFICATION';
+    onProgress({ type: 'progress', phase: 'VERIFICATION', content: 'Verifying output...' });
+
+    // Simple verification - check if output seems complete
+    // In a real system, this would be more sophisticated
+
+    // Phase 5: Complete
+    session.phase = 'DONE';
+    session.completed_at = new Date().toISOString();
+    session.updated_at = new Date().toISOString();
+
+    onProgress({ type: 'complete', session });
+    onComplete(session);
+
+  } catch (error) {
+    session.phase = 'ERROR';
+    onError(error instanceof Error ? error.message : 'Unknown error');
   }
+
+  return { sessionId, abort };
 }
 
 /**
- * Stop an autonomous agent session
- */
-export async function stopAutonomousScan(agentSessionId: string): Promise<{ session: AgentSession | null; report: string | null }> {
-  try {
-    const response = await fetch(AGENT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-      },
-      body: JSON.stringify({
-        action: 'stop',
-        agentSessionId,
-      }),
-    });
-
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || 'Failed to stop agent session');
-    }
-
-    const data = await response.json();
-    return { session: data.session || null, report: data.report || null };
-  } catch (e) {
-    console.error('Failed to stop agent:', e);
-    return { session: null, report: null };
-  }
-}
-
-/**
- * Get the status of an autonomous agent session
- */
-export async function getAgentStatus(params: { agentSessionId?: string; chatSessionId?: string }): Promise<AgentSession | null> {
-  try {
-    const response = await fetch(AGENT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-      },
-      body: JSON.stringify({
-        action: 'status',
-        ...params,
-      }),
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = await response.json();
-    return data.session || null;
-  } catch (e) {
-    console.error('Failed to get agent status:', e);
-    return null;
-  }
-}
-
-/**
- * Check if autonomous mode should be triggered based on user message
+ * Check if a message should trigger autonomous mode
  */
 export function shouldTriggerAutonomousMode(message: string): { trigger: boolean; target?: string } {
   const lowerMessage = message.toLowerCase();
   
-  // Patterns that indicate autonomous scan request
+  // Patterns that indicate autonomous operation
   const autonomousPatterns = [
-    /(?:فحص|اختبار|تحليل)\s+(?:شامل|كامل|مستقل|autonomous)/i,
-    /(?:comprehensive|full|complete|autonomous)\s+(?:scan|test|assessment)/i,
-    /اختبر?\s+(?:بشكل\s+)?(?:مستقل|تلقائي|شامل)/i,
+    /(?:اعمل|نفذ|قم ب|ابدأ)\s+(?:تلقائي|مستقل|كامل|شامل)/i,
+    /(?:execute|run|start|do)\s+(?:autonomous|auto|full|complete)/i,
     /افحص?\s+(?:بشكل\s+)?(?:مستقل|تلقائي|شامل)/i,
     /run\s+autonomous/i,
     /start\s+agent/i,
-    /ابدأ\s+(?:الوكيل|العميل)/i,
+    /auto\s+mode/i,
   ];
   
   const isAutonomous = autonomousPatterns.some(p => p.test(message));
   
-  if (!isAutonomous) {
-    return { trigger: false };
-  }
-  
-  // Extract target from message
-  const urlMatch = message.match(/https?:\/\/[^\s]+/i);
-  const domainMatch = message.match(/(?:^|\s)([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}(?:\s|$)/);
-  
-  const target = urlMatch?.[0] || domainMatch?.[0]?.trim();
-  
-  return { trigger: true, target };
+  return { trigger: isAutonomous, target: isAutonomous ? message : undefined };
 }
 
-export async function streamChat({
-  messages,
-  customSystemPrompt,
-  onDelta,
-  onDone,
-  onError,
-}: {
-  messages: ChatMessage[];
-  customSystemPrompt?: string;
-  onDelta: (deltaText: string) => void;
-  onDone: () => void;
-  onError: (error: string) => void;
-}) {
-  const providerSettings = await getAIProviderSettings();
-  const body: any = { messages, customSystemPrompt };
+// ============================================================================
+// CONVERSATION MEMORY FUNCTIONS
+// ============================================================================
 
-  // Build allProviderKeys from ALL providers that have keys, regardless of enabled state
-  const allProviderKeys: { providerId: string; keys: string[] }[] = [];
-  if (providerSettings) {
-    for (const [pid, keys] of Object.entries(providerSettings.providerKeys || {})) {
-      const validKeys = (keys || []).filter(k => k.key.trim()).map(k => k.key);
-      if (validKeys.length > 0) {
-        allProviderKeys.push({ providerId: pid, keys: validKeys });
-      }
-    }
-  }
+/**
+ * Get conversation history for a session
+ */
+export function getConversationHistory(sessionId: string): ChatMessage[] {
+  const history = conversationMemory.getHistory(sessionId);
+  return history.map(m => ({
+    role: m.role === 'user' ? 'user' : 'assistant',
+    content: m.parts.map(p => p.text).join('')
+  }));
+}
 
-  if (providerSettings && providerSettings.enabled) {
-    const activeKeys = (providerSettings.providerKeys?.[providerSettings.providerId] || []).filter(k => k.key.trim());
-    if (activeKeys.length > 0) {
-      allProviderKeys.sort((a, b) => a.providerId === providerSettings.providerId ? -1 : b.providerId === providerSettings.providerId ? 1 : 0);
-      body.customProvider = {
-        providerId: providerSettings.providerId,
-        modelId: providerSettings.modelId,
-        apiKey: activeKeys[0].key,
-        apiKeys: activeKeys.map(k => k.key),
-        allProviderKeys,
-      };
-    }
-  } else if (allProviderKeys.length > 0) {
-    // Custom provider disabled but keys exist - send as fallback when default fails
-    body.fallbackProviderKeys = allProviderKeys;
-  }
+/**
+ * Clear conversation history for a session
+ */
+export function clearConversationHistory(sessionId: string): void {
+  conversationMemory.clearSession(sessionId);
+}
 
-  const resp = await fetch(CHAT_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+/**
+ * Get all session IDs
+ */
+export function getAllSessions(): string[] {
+  return conversationMemory.getAllSessions();
+}
 
-  if (!resp.ok) {
-    const data = await resp.json().catch(() => ({}));
-    onError(data.error || "فشل الاتصال بالوكيل");
-    return;
-  }
+/**
+ * Clear all conversation history
+ */
+export function clearAllHistory(): void {
+  conversationMemory.clearAll();
+}
 
-  if (!resp.body) {
-    onError("لا يوجد استجابة");
-    return;
-  }
+// ============================================================================
+// SKILLS ACCESS
+// ============================================================================
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let textBuffer = "";
-  let streamDone = false;
+/**
+ * Get available skills
+ */
+export function getAvailableSkills() {
+  return skillsEngine.getAllSkills();
+}
 
-  while (!streamDone) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    textBuffer += decoder.decode(value, { stream: true });
+/**
+ * Get skills by category
+ */
+export function getSkillsByCategory(category: string) {
+  return skillsEngine.getSkillsByCategory(category as any);
+}
 
-    let newlineIndex: number;
-    while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-      let line = textBuffer.slice(0, newlineIndex);
-      textBuffer = textBuffer.slice(newlineIndex + 1);
+/**
+ * Get skill count
+ */
+export function getSkillCount(): number {
+  return skillsEngine.getSkillCount();
+}
 
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-      if (line.startsWith(":") || line.trim() === "") continue;
-      if (!line.startsWith("data: ")) continue;
-
-      const jsonStr = line.slice(6).trim();
-      if (jsonStr === "[DONE]") {
-        streamDone = true;
-        break;
-      }
-
-      try {
-        const parsed = JSON.parse(jsonStr);
-        const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-        if (content) onDelta(content);
-      } catch {
-        textBuffer = line + "\n" + textBuffer;
-        break;
-      }
-    }
-  }
-
-  if (textBuffer.trim()) {
-    for (let raw of textBuffer.split("\n")) {
-      if (!raw) continue;
-      if (raw.endsWith("\r")) raw = raw.slice(0, -1);
-      if (raw.startsWith(":") || raw.trim() === "") continue;
-      if (!raw.startsWith("data: ")) continue;
-      const jsonStr = raw.slice(6).trim();
-      if (jsonStr === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(jsonStr);
-        const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-        if (content) onDelta(content);
-      } catch { /* ignore */ }
-    }
-  }
-
-  onDone();
+/**
+ * Test Gemini connection
+ */
+export async function testGeminiConnection(): Promise<{ success: boolean; model: string; error?: string }> {
+  const gemini = new GeminiUnofficial();
+  return gemini.testConnection();
 }

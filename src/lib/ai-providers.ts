@@ -1,98 +1,216 @@
-import { supabase } from "@/integrations/supabase/client";
+/**
+ * AI Provider - Gemini Unofficial ONLY
+ * 
+ * This module provides Gemini unofficial API as the ONLY AI provider.
+ * No API keys, tokens, or cookies required.
+ */
 
+import { GeminiUnofficial, GEMINI_MODELS, conversationMemory } from './gemini-unofficial';
+import { skillsEngine, SkillsEngine } from './skills-engine';
+
+// Re-export Gemini types
+export { GEMINI_MODELS, conversationMemory };
+
+// Single AI Provider - Gemini Unofficial
 export interface AIProvider {
   id: string;
   name: string;
   nameAr: string;
-  baseUrl: string;
-  apiKeyUrl: string;
-  models: { id: string; name: string }[];
+  models: { id: string; name: string; description?: string }[];
+  requiresKey: boolean;
 }
 
 export const AI_PROVIDERS: AIProvider[] = [
   {
-    id: "openai",
-    name: "OpenAI",
-    nameAr: "أوبن إيه آي",
-    baseUrl: "https://api.openai.com/v1/chat/completions",
-    apiKeyUrl: "https://platform.openai.com/api-keys",
-    models: [
-      { id: "gpt-4o", name: "GPT-4o" },
-      { id: "gpt-4o-mini", name: "GPT-4o Mini" },
-      { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-      { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" },
-      { id: "o1", name: "o1" },
-      { id: "o1-mini", name: "o1 Mini" },
-      { id: "o3-mini", name: "o3 Mini" },
-    ],
-  },
-  {
-    id: "google",
-    name: "Google AI",
-    nameAr: "جوجل",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    apiKeyUrl: "https://aistudio.google.com/apikey",
-    models: [
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-      { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
-      { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
-      { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
-    ],
-  },
-  {
-    id: "anthropic",
-    name: "Anthropic",
-    nameAr: "أنثروبيك",
-    baseUrl: "https://api.anthropic.com/v1/messages",
-    apiKeyUrl: "https://console.anthropic.com/settings/keys",
-    models: [
-      { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
-      { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
-      { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
-      { id: "claude-3-opus-20240229", name: "Claude 3 Opus" },
-    ],
-  },
-  {
-    id: "xai",
-    name: "xAI (Grok)",
-    nameAr: "إكس إيه آي",
-    baseUrl: "https://api.x.ai/v1/chat/completions",
-    apiKeyUrl: "https://console.x.ai",
-    models: [
-      { id: "grok-3", name: "Grok 3" },
-      { id: "grok-3-mini", name: "Grok 3 Mini" },
-      { id: "grok-2", name: "Grok 2" },
-    ],
-  },
-  {
-    id: "deepseek",
-    name: "DeepSeek",
-    nameAr: "ديب سيك",
-    baseUrl: "https://api.deepseek.com/chat/completions",
-    apiKeyUrl: "https://platform.deepseek.com/api_keys",
-    models: [
-      { id: "deepseek-chat", name: "DeepSeek Chat (V3)" },
-      { id: "deepseek-reasoner", name: "DeepSeek Reasoner (R1)" },
-    ],
-  },
-  {
-    id: "groq",
-    name: "Groq",
-    nameAr: "جروك",
-    baseUrl: "https://api.groq.com/openai/v1/chat/completions",
-    apiKeyUrl: "https://console.groq.com/keys",
-    models: [
-      { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B" },
-      { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant" },
-      { id: "mixtral-8x7b-32768", name: "Mixtral 8x7B" },
-      { id: "gemma2-9b-it", name: "Gemma 2 9B" },
-      { id: "deepseek-r1-distill-llama-70b", name: "DeepSeek R1 70B" },
-    ],
-  },
+    id: "gemini-unofficial",
+    name: "Gemini (Free - No Key Required)",
+    nameAr: "جيميني (مجاني - بدون مفتاح)",
+    models: GEMINI_MODELS,
+    requiresKey: false
+  }
 ];
 
-// Security API providers (VirusTotal, Shodan, etc.)
+// Current settings (simplified - no API keys needed)
+export interface AIProviderSettings {
+  providerId: string;
+  modelId: string;
+  enabled: boolean;
+}
+
+// Default to Gemini 2.0 Flash
+const DEFAULT_SETTINGS: AIProviderSettings = {
+  providerId: 'gemini-unofficial',
+  modelId: 'gemini-2.0-flash-exp',
+  enabled: true
+};
+
+// Settings stored in localStorage
+const SETTINGS_KEY = 'ai_provider_settings';
+
+export function getAIProviderSettings(): AIProviderSettings {
+  try {
+    const stored = localStorage.getItem(SETTINGS_KEY);
+    if (stored) {
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+    }
+  } catch (e) {
+    console.warn('[v0] Failed to load AI settings:', e);
+  }
+  return DEFAULT_SETTINGS;
+}
+
+export function saveAIProviderSettings(settings: AIProviderSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    console.warn('[v0] Failed to save AI settings:', e);
+  }
+}
+
+export function clearAIProviderSettings(): void {
+  try {
+    localStorage.removeItem(SETTINGS_KEY);
+  } catch (e) {
+    console.warn('[v0] Failed to clear AI settings:', e);
+  }
+}
+
+// ============================================================================
+// UNIFIED AI CLIENT - Uses Gemini + Skills Engine
+// ============================================================================
+
+export class UnifiedAIClient {
+  private gemini: GeminiUnofficial;
+  private skills: SkillsEngine;
+  private sessionId: string;
+
+  constructor(sessionId?: string) {
+    this.sessionId = sessionId || `unified_${Date.now()}`;
+    const settings = getAIProviderSettings();
+    this.gemini = new GeminiUnofficial(this.sessionId, { model: settings.modelId });
+    this.skills = new SkillsEngine(this.sessionId);
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  /**
+   * Process a message - automatically uses skills when appropriate
+   */
+  async chat(message: string, options?: {
+    useSkills?: boolean;
+    systemPrompt?: string;
+  }): Promise<string> {
+    const useSkills = options?.useSkills !== false;
+
+    // Try to match a skill first
+    if (useSkills) {
+      const match = await this.skills.selectSkill(message);
+      if (match && match.score >= 10) {
+        console.log(`[v0] Using skill: ${match.skill.name} (score: ${match.score})`);
+        const result = await this.skills.run(message);
+        if (result.execution?.success) {
+          return result.execution.output;
+        }
+      }
+    }
+
+    // Fall back to direct Gemini chat
+    if (options?.systemPrompt) {
+      this.gemini.setSystemInstruction(options.systemPrompt);
+    }
+    return this.gemini.generate(message);
+  }
+
+  /**
+   * Stream a chat response
+   */
+  async *chatStream(message: string, options?: {
+    useSkills?: boolean;
+    systemPrompt?: string;
+  }): AsyncGenerator<string, void, unknown> {
+    const useSkills = options?.useSkills !== false;
+
+    // Try skills first
+    if (useSkills) {
+      const match = await this.skills.selectSkill(message);
+      if (match && match.score >= 10) {
+        for await (const update of this.skills.runStream(message)) {
+          if (update.content) {
+            yield update.content;
+          }
+        }
+        return;
+      }
+    }
+
+    // Fall back to direct streaming
+    if (options?.systemPrompt) {
+      this.gemini.setSystemInstruction(options.systemPrompt);
+    }
+    yield* this.gemini.generateStream(message);
+  }
+
+  /**
+   * Get conversation history
+   */
+  getHistory() {
+    return this.gemini.getHistory();
+  }
+
+  /**
+   * Clear conversation history
+   */
+  clearHistory(): void {
+    this.gemini.clearHistory();
+  }
+
+  /**
+   * Test connection to Gemini
+   */
+  async testConnection(): Promise<{ success: boolean; model: string; error?: string }> {
+    return this.gemini.testConnection();
+  }
+
+  /**
+   * Get skills engine for direct access
+   */
+  getSkillsEngine(): SkillsEngine {
+    return this.skills;
+  }
+
+  /**
+   * Get Gemini client for direct access
+   */
+  getGeminiClient(): GeminiUnofficial {
+    return this.gemini;
+  }
+}
+
+// Export singleton
+export const aiClient = new UnifiedAIClient();
+
+// ============================================================================
+// BACKWARD COMPATIBILITY
+// ============================================================================
+
+// These are kept for backward compatibility but they don't do anything with API keys
+export interface APIKeyEntry {
+  key: string;
+  label: string;
+  status?: "unknown" | "valid" | "invalid" | "no_balance";
+  balance?: string;
+  lastChecked?: number;
+}
+
+export type ProviderKeysMap = Record<string, APIKeyEntry[]>;
+
+export async function updateKeyStatus(_keyIndex: number, _status: APIKeyEntry["status"], _balance?: string): Promise<void> {
+  // No-op - Gemini unofficial doesn't need API keys
+}
+
+// Security API providers (kept for compatibility)
 export interface SecurityAPIProvider {
   id: string;
   name: string;
@@ -110,114 +228,3 @@ export const SECURITY_API_PROVIDERS: SecurityAPIProvider[] = [
     description: "فحص URLs والنطاقات و IPs من البرمجيات الخبيثة",
   },
 ];
-
-export interface APIKeyEntry {
-  key: string;
-  label: string;
-  status?: "unknown" | "valid" | "invalid" | "no_balance";
-  balance?: string;
-  lastChecked?: number;
-}
-
-// Keys stored per provider: { "openai": [...], "groq": [...], ... }
-export type ProviderKeysMap = Record<string, APIKeyEntry[]>;
-
-export interface AIProviderSettings {
-  providerId: string;
-  modelId: string;
-  apiKey: string;
-  apiKeys: APIKeyEntry[]; // active provider's keys (derived)
-  providerKeys: ProviderKeysMap; // all providers' keys
-  enabled: boolean;
-}
-
-// ---- Database-backed persistence ----
-
-export async function getAIProviderSettings(): Promise<AIProviderSettings | null> {
-  try {
-    const result = await supabase
-      .from("ai_provider_settings")
-      .select("*")
-      .limit(1)
-      .maybeSingle();
-
-    const { data, error } = result || { data: null, error: null };
-
-    if (error || !data) {
-      console.warn('[v0] AI provider settings not found or error:', error?.message);
-      return null;
-    }
-
-    const raw = data.api_keys as unknown;
-    let providerKeys: ProviderKeysMap = {};
-
-    // Migration: if old format (flat array), convert to new per-provider map
-    if (Array.isArray(raw)) {
-      providerKeys[data.provider_id] = raw as APIKeyEntry[];
-    } else if (raw && typeof raw === "object") {
-      providerKeys = raw as ProviderKeysMap;
-    }
-
-    const activeKeys = providerKeys[data.provider_id] || [];
-
-    return {
-      providerId: data.provider_id,
-      modelId: data.model_id,
-      apiKey: activeKeys[0]?.key || "",
-      apiKeys: activeKeys,
-      providerKeys,
-      enabled: data.enabled,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export async function saveAIProviderSettings(settings: AIProviderSettings) {
-  const activeKeys = settings.providerKeys[settings.providerId] || [];
-  settings.apiKey = activeKeys[0]?.key || "";
-  settings.apiKeys = activeKeys;
-
-  const row = {
-    provider_id: settings.providerId,
-    model_id: settings.modelId,
-    api_keys: settings.providerKeys as any,
-    enabled: settings.enabled,
-    updated_at: new Date().toISOString(),
-  };
-
-  const { data: existing } = await supabase
-    .from("ai_provider_settings")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-
-  if (existing) {
-    await supabase
-      .from("ai_provider_settings")
-      .update(row)
-      .eq("id", existing.id);
-  } else {
-    await supabase
-      .from("ai_provider_settings")
-      .insert(row);
-  }
-}
-
-export async function clearAIProviderSettings() {
-  await supabase.from("ai_provider_settings").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-}
-
-export async function updateKeyStatus(keyIndex: number, status: APIKeyEntry["status"], balance?: string) {
-  try {
-    const settings = await getAIProviderSettings();
-    if (!settings) return;
-    const activeKeys = settings.providerKeys[settings.providerId] || [];
-    if (!activeKeys[keyIndex]) return;
-    activeKeys[keyIndex].status = status;
-    activeKeys[keyIndex].balance = balance;
-    activeKeys[keyIndex].lastChecked = Date.now();
-    settings.providerKeys[settings.providerId] = activeKeys;
-    await saveAIProviderSettings(settings);
-  } catch {}
-}
