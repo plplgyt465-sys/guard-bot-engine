@@ -1,73 +1,44 @@
-# Welcome to your Lovable project
+# GuardBot Engine
 
-## Project info
+> Real-Time Intrusion Detection & Automated Alert System
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue) ![React](https://img.shields.io/badge/React-18+-61DAFB) ![License](https://img.shields.io/badge/License-MIT-green)
 
-## How can I edit this code?
+## Overview
 
-There are several ways of editing your application.
+GuardBot Engine is a real-time intrusion detection system with an automated alerting engine. It monitors network traffic, system logs, and user behavior to detect anomalies and trigger instant alerts when threats are identified.
 
-**Use Lovable**
+## Features
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+- 🚨 **Real-Time Monitoring** — Live traffic and log analysis
+- 🤖 **Automated Response** — Auto-block suspicious IPs and sessions
+- 📡 **Multi-Source Ingestion** — Firewall logs, syslog, web server logs
+- 🧠 **Anomaly Detection** — Behavioral baseline and deviation alerts
+- 📲 **Alert Engine** — Telegram, Email, and Webhook notifications
+- 📊 **Dashboard** — Live threat visualization and incident timeline
 
-Changes made via Lovable will be committed automatically to this repo.
+## Installation
 
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+```bash
+git clone https://github.com/plplgyt465-sys/guard-bot-engine
+cd guard-bot-engine
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+## Alert Channels
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+| Channel | Status |
+|---------|--------|
+| Telegram Bot | ✅ Supported |
+| Email (SMTP) | ✅ Supported |
+| Webhook | ✅ Supported |
+| Slack | 🔄 Coming soon |
 
-**Use GitHub Codespaces**
+## Disclaimer
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+> Deploy only on systems you own or have explicit authorization to monitor.
 
-## What technologies are used for this project?
+## Author
 
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+**Shadow Core** — Security Engineer | Intrusion Detection Specialist
